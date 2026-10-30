@@ -39,8 +39,8 @@ ricemonkey-bot은 **각자 최종적으로 받는 금액**을 기준으로 올�
 ## 🚧 지금은 어디까지 만들었나요?
 
 > [!NOTE]
-> **현재는 뼈대만 있어요.** `discord-hono`를 통한 Discord 요청 서명 검증과 PING → PONG 응답, 이를 확인하는 테스트 6개가 있어요.
-> 명령, 분배 계산, DB 스키마는 아직 구현하지 않았고, 실제 배포도 하지 않았어요.
+> **현재는 뼈대와 분배 계산 모듈이 있어요.** `discord-hono`를 통한 Discord 요청 서명 검증과 PING → PONG 응답, 분배 계산 모듈과 이를 확인하는 테스트가 있어요.
+> 분배 계산은 아직 명령에 연결하지 않았어요. 명령과 DB 스키마는 아직 구현하지 않았고, 실제 배포도 하지 않았어요.
 > 아래 기능과 사용 흐름은 모두 **구현 계획**이에요. 지금 바로 초대해 사용하는 봇은 아니에요.
 
 <a id="features"></a>
@@ -174,9 +174,11 @@ ricemonkey-bot/
 │   ├── architecture.md         # 기술 선택과 미검증 사항
 │   └── workflow.md             # 브랜치, 커밋, 버전, 릴리스 규칙
 ├── src/
-│   └── index.ts                # DiscordHono 진입점
+│   ├── index.ts                # DiscordHono 진입점
+│   └── split.ts                # 분배 계산과 입력 검증
 ├── test/
-│   └── interactions.test.ts    # 서명 검증과 PING 테스트
+│   ├── interactions.test.ts    # 서명 검증과 PING 테스트
+│   └── split.test.ts           # 분배 계산과 입력 검증 테스트
 ├── .dev.vars.example           # 로컬 환경변수 예시
 ├── package.json                # 의존성과 실행 명령
 ├── package-lock.json           # 의존성 잠금 파일
@@ -191,7 +193,7 @@ ricemonkey-bot/
 - [x] 도메인·기능·아키텍처 문서 작성
 - [x] TypeScript + Workers + DiscordHono 뼈대 구성
 - [x] 서명 검증·PING 응답 테스트 6개 작성
-- [ ] 분배 계산과 입력 검증 구현
+- [x] 분배 계산과 입력 검증 구현 (봇 계정 검사는 명령 구현 때)
 - [ ] D1 스키마와 분배·파티원 상태 저장 구현
 - [ ] 분배 생성·금액 안내·버튼 권한·완료·취소 구현
 - [ ] 미완료 조회와 본인 전용 내역 조회 구현
