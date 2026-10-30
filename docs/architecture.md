@@ -54,10 +54,11 @@ GitHub Actions 워크플로로 검사와 배포를 처리한다. 공개 저장�
 
 | 단계 | 실행 시점 | 내용 | 상태 |
 |---|---|---|---|
-| CI | PR, `main` 푸시 | `npm ci`, 타입 검사, 테스트, `wrangler deploy --dry-run` | 구현 |
-| CD | `main` 푸시 후 CI 통과 | D1 마이그레이션 적용, Worker 배포, 슬래시 명령 등록 | 미구현 |
+| CI | PR, `main`과 `claude/**` 푸시 | `npm ci`, 타입 검사, 테스트, `wrangler deploy --dry-run` | 구현 |
+| CD | `main` 푸시 중 `v<버전>` 태그가 없을 때 | 검사, D1 마이그레이션 적용, Worker 배포, 슬래시 명령 등록, 태그, GitHub 릴리스 | 미구현 |
 
-- 배포 단계에서 앞 단계가 실패하면 뒤 단계를 실행하지 않는다.
+- 버전이 바뀐 푸시만 배포한다. 아직 내보내지 않을 기능을 `main`에 넣어도 실행 중인 봇은 바뀌지 않는다. 규칙은 [작업 규칙](workflow.md)을 따른다.
+- 배포 단계에서 앞 단계가 실패하면 뒤 단계를 실행하지 않고 태그도 남기지 않는다. 고친 커밋을 합치면 같은 번호로 다시 돈다.
 - 설정을 저장소에서 관리하려고 Workers Builds 대신 GitHub Actions를 쓴다. Workers Builds도 무료 플랜에 월 3,000분이 포함되어 있다.
 - 배포는 lockfile에 고정된 버전의 `npx wrangler`로 실행한다.
 - 비밀값은 `main` 푸시의 배포 단계에서만 쓴다. 외부 PR에는 비밀값이 전달되지 않게 하고 `pull_request_target`은 쓰지 않는다. 액션은 커밋 SHA로 고정한다.
