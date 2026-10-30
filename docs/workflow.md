@@ -14,12 +14,12 @@
 
 ## 3. `main`에 합치기
 1. `git fetch origin` 후 `git rebase origin/main`으로 최신 `main` 위에 올린다.
-2. `git push -u origin HEAD`로 브랜치를 올리고 CI가 통과하는지 확인한다. rebase로 커밋이 바뀌었으면 `--force-with-lease`를 쓴다.
+2. `npm run typecheck`, `npm test`, `npx wrangler deploy --dry-run`을 로컬에서 돌려 통과를 확인하고 `git push -u origin HEAD`로 브랜치를 올린다. rebase로 커밋이 바뀌었으면 `--force-with-lease`를 쓴다.
 3. `git push origin HEAD:main`으로 합친다. fast-forward만 받아들여지며, 거부되면 1번부터 다시 한다.
 4. 원격과 로컬 브랜치를 지운다.
 
 ## 4. `main` 보호
-GitHub ruleset이 force push, 브랜치 삭제, merge commit을 막고 CI `ci`를 통과한 커밋만 받는다.
+GitHub ruleset이 force push, 브랜치 삭제, merge commit을 막는다. 프로토타입 완성 전까지 CI가 없으므로 검사 통과는 3절 절차로만 지킨다.
 
 ## 5. 금지
 - `git push --force`, `main`에 들어간 커밋 수정, 배포된 태그 삭제나 이동을 하지 않는다.
@@ -40,6 +40,7 @@ GitHub ruleset이 force push, 브랜치 삭제, merge commit을 막고 CI `ci`�
 - 배포된 번호는 다시 쓰지 않는다.
 
 ## 7. 릴리스
+CD는 프로토타입 완성 후에 붙인다. 그 전까지 이 절은 적용하지 않는다.
 소유자가 요청할 때만 한다.
 
 1. 작업 브랜치에서 `npm version <major|minor|patch> --no-git-tag-version`으로 버전을 올린다.
