@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ricemonkey-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-30",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ricemonkey-bot",
+      // PLACEHOLDER: fill database_id after running wrangler d1 create ricemonkey-bot.
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ]
+}

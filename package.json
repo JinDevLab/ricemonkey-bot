@@ -1,0 +1,27 @@
+{
+  "name": "ricemonkey-bot",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "discord-hono": "0.23.0",
+    "hono": "4.13.14"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261030.1",
+    "@types/node": "24.19.2",
+    "discord-api-types": "0.38.57",
+    "typescript": "7.0.2",
+    "vitest": "5.0.5",
+    "wrangler": "4.156.0"
+  }
+}
