@@ -53,7 +53,7 @@ function database(c: Context) {
 app.command('분배', guarded<CommandContext<Env>>(async (c) => {
   const stored = buildSplit(c.interaction as APIChatInputApplicationCommandInteraction)
   await createSplit(database(c), stored)
-  return c.res(renderSplit(stored, true))
+  return c.res(renderSplit(stored))
 }))
 
 for (const name of ['미완료', '내역']) {

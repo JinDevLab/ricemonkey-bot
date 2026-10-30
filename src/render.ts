@@ -9,7 +9,7 @@ const button = (custom_id: string, label: string, style: 1 | 2 | 3 | 4, disabled
 })
 const row = (components: APIButtonComponentWithCustomId[]): APIActionRowComponent<APIButtonComponentWithCustomId> => ({ type: 1, components })
 
-export function renderSplit({ split: s, members }: StoredSplit, creation = false): APIInteractionResponseCallbackData {
+export function renderSplit({ split: s, members }: StoredSplit): APIInteractionResponseCallbackData {
   const visible = members.filter((m) => m.status !== 'excluded')
   const content = [
     `${s.status === 'completed' ? '✅ ' : ''}분배 · ${splitStatus[s.status]}`,
@@ -21,7 +21,7 @@ export function renderSplit({ split: s, members }: StoredSplit, creation = false
   ].join('\n')
   return {
     content,
-    allowed_mentions: { parse: [], users: creation ? visible.map((m) => m.user_id) : [] },
+    allowed_mentions: { parse: [], users: visible.map((m) => m.user_id) },
     components: s.status === 'active' ? [
       row([button(`uploaded;${s.id}`, '올렸어요', 1)]),
       row(visible.map((m) => button(`purchased;${s.id};${m.user_id}`, `구매 완료 · ${m.display_name}`, 3, m.status === 'purchased'))),
