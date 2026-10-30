@@ -3,7 +3,7 @@ import type { CommandContext, ComponentContext } from 'discord-hono'
 import type { APIChatInputApplicationCommandInteraction } from 'discord-api-types/v10'
 import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, unfinished } from './db'
 import { buildSplit, InputError } from './input'
-import { renderHistory, renderSplit, renderUnfinished } from './render'
+import { money, renderHistory, renderSplit, renderUnfinished } from './render'
 
 export interface Bindings {
   DB?: D1Database
@@ -123,7 +123,7 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
         try {
           const notification = await c.rest('POST', $webhooks$_$_,
             [c.interaction.application_id, c.interaction.token], {
-              content: `<@${stored.split.distributor_id}> 파티원이 물건을 올렸어요. 분배 ${id}`,
+              content: `<@${stored.split.distributor_id}> <@${user}>님이 ${money(member!.listing_amount)}메소로 올렸어요`,
               allowed_mentions: { parse: [], users: [stored.split.distributor_id] },
             })
           if (!notification.ok) console.error('upload notification failed', { action, status: notification.status })
