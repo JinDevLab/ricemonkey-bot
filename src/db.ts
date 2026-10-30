@@ -98,19 +98,21 @@ export interface PendingRow {
   listing_amount: number
   status: MemberRow['status']
   distributor_id: string
+  channel_id: string
+  created_at: string
 }
 
 export async function unfinished(db: D1Database, guild: string, user: string) {
   // Bound the response as well as the number of returned rows; no Discord message can grow unbounded.
   const [upload, purchase] = await db.batch([
-    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.status, s.distributor_id
+    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.status, s.distributor_id, s.channel_id, s.created_at
       FROM split_members m JOIN splits s ON s.id = m.split_id
       WHERE m.user_id = ? AND m.status = 'pending' AND s.guild_id = ? AND s.status = 'active'
-      ORDER BY s.created_at DESC, s.id DESC LIMIT 10`).bind(user, guild),
-    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.status, s.distributor_id
+      ORDER BY s.created_at ASC, s.id ASC LIMIT 11`).bind(user, guild),
+    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.status, s.distributor_id, s.channel_id, s.created_at
       FROM splits s JOIN split_members m ON m.split_id = s.id
       WHERE s.guild_id = ? AND s.distributor_id = ? AND s.status = 'active'
-      AND m.status IN ('pending', 'uploaded') ORDER BY s.created_at DESC, s.id DESC, m.position LIMIT 10`)
+      AND m.status IN ('pending', 'uploaded') ORDER BY s.created_at ASC, s.id ASC, m.position LIMIT 11`)
       .bind(guild, user),
   ])
   return { upload: upload.results as unknown as PendingRow[], purchase: purchase.results as unknown as PendingRow[] }
