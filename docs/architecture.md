@@ -49,13 +49,28 @@ D1의 일일 한도는 00:00 UTC에 초기화된다.
 - 안내, 상태 변경, 알림은 상호작용 응답으로 처리한다.
 - 동시 클릭으로 상태가 덮어써지지 않도록 파티원별 상태를 개별 행으로 갱신한다.
 
-## 6. 미검증 사항
+## 6. CI/CD
+GitHub Actions 워크플로로 검사와 배포를 처리한다. 공개 저장소의 표준 러너는 무료다.
+
+| 단계 | 실행 시점 | 내용 | 상태 |
+|---|---|---|---|
+| CI | PR, `main` 푸시 | `npm ci`, 타입 검사, 테스트, `wrangler deploy --dry-run` | 구현 |
+| CD | `main` 푸시 후 CI 통과 | D1 마이그레이션 적용, Worker 배포, 슬래시 명령 등록 | 미구현 |
+
+- 배포 단계에서 앞 단계가 실패하면 뒤 단계를 실행하지 않는다.
+- 설정을 저장소에서 관리하려고 Workers Builds 대신 GitHub Actions를 쓴다. Workers Builds도 무료 플랜에 월 3,000분이 포함되어 있다.
+- 배포는 lockfile에 고정된 버전의 `npx wrangler`로 실행한다.
+- 비밀값은 `main` 푸시의 배포 단계에서만 쓴다. 외부 PR에는 비밀값이 전달되지 않게 하고 `pull_request_target`은 쓰지 않는다. 액션은 커밋 SHA로 고정한다.
+- `wrangler rollback`은 코드만 되돌리고 DB는 되돌리지 않는다. 자동 배포에는 테이블이나 컬럼을 추가하는 마이그레이션만 태우고 삭제는 따로 처리한다.
+
+## 7. 미검증 사항
 - Workers와 D1만 쓸 때 가입에 카드가 필요 없는지는 공식 문서에서 확인하지 못했다.
 - 서명 검증과 DB 처리가 CPU 10ms 안에 들어오는지는 첫 배포 때 확인한다.
 - 봇 토큰으로 일반 API를 호출하기 전에 Gateway 접속이 필요한지는 확정하지 못했다. 완료 이모지만 일반 API가 필요하며, 안 되면 메시지에 ✅를 넣는 것으로 대체한다.
 - 아키텍처 전체를 실제로 배포해 보지 않았다.
+- "Edit Cloudflare Workers" API 토큰 템플릿에 D1 편집 권한이 포함되는지 확인하지 못했다. CD를 켤 때 확인한다.
 
-## 7. 출처
+## 8. 출처
 - https://developers.cloudflare.com/workers/platform/pricing/
 - https://developers.cloudflare.com/workers/platform/limits/
 - https://developers.cloudflare.com/d1/platform/pricing/
@@ -70,3 +85,5 @@ D1의 일일 한도는 00:00 UTC에 초기화된다.
 - https://www.koyeb.com/docs/reference/instances
 - https://docs.railway.com/reference/pricing/plans
 - https://docs.fly.io/about/pricing
+- https://docs.github.com/en/billing/concepts/product-billing/github-actions
+- https://developers.cloudflare.com/workers/ci-cd/builds/limits-and-pricing/
