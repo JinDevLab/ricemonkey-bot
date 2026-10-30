@@ -171,7 +171,8 @@ ricemonkey-bot/
 ├── docs/
 │   ├── domain.md               # 분배 규칙과 계산 예시
 │   ├── features.md             # 1차 기능 범위
-│   └── architecture.md         # 기술 선택과 미검증 사항
+│   ├── architecture.md         # 기술 선택과 미검증 사항
+│   └── workflow.md             # 브랜치, 커밋, 버전, 릴리스 규칙
 ├── src/
 │   └── index.ts                # DiscordHono 진입점
 ├── test/
@@ -206,6 +207,7 @@ ricemonkey-bot/
 - [도메인](docs/domain.md) — 용어, 수수료, 역산 공식과 계산 예시
 - [기능 명세](docs/features.md) — 역할, 입력 검증, 조회와 취소 범위
 - [아키텍처](docs/architecture.md) — 기술 선택, 구현 제약, 무료 한도와 미검증 사항
+- [작업 규칙](docs/workflow.md) — 브랜치, 커밋, 버전, 릴리스
 
 ## 📄 라이선스
 
