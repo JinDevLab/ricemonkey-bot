@@ -98,6 +98,29 @@ describe('calculateSplit', () => {
     }
   })
 
+  it.each([
+    { percents: [5000, 5000, 0], listings: [48_223_350n, 0n], receipts: [46_776_649n, 0n], distributorFinal: 46_776_650n },
+    { percents: [5000, 0, 5000], listings: [0n, 48_223_350n], receipts: [0n, 46_776_649n], distributorFinal: 46_776_650n },
+    { percents: [5000, 0, undefined], listings: [0n, 48_223_350n], receipts: [0n, 46_776_649n], distributorFinal: 46_776_650n },
+    { percents: [0, 5000, 5000], listings: [47_500_000n, 47_500_000n], receipts: [46_075_000n, 46_075_000n], distributorFinal: 0n },
+  ])('supports zero-percent participants for $percents', ({ percents, listings, receipts, distributorFinal }) => {
+    const result = calculateSplit(inputFor(percents))
+    expect(result.netSale).toBe(95_000_000n)
+    expect(result.distributorFinal).toBe(distributorFinal)
+    expect(result.members.map(({ listingAmount, expectedReceipt }) => [listingAmount, expectedReceipt]))
+      .toEqual(listings.map((listingAmount, index) => [listingAmount, receipts[index]]))
+  })
+
+  it('allows a 100% distributor with a 0% member', () => {
+    const result = calculateSplit(inputFor([10000, 0]))
+    expect(result.members).toEqual([{ id: 'person-1', listingAmount: 0n, expectedReceipt: 0n }])
+    expect(result.distributorFinal).toBe(95_000_000n)
+  })
+
+  it('still rejects a partial sum with no remaining percent', () => {
+    expectCode(inputFor([5000, 5000, undefined]), 'PERCENT_SUM')
+  })
+
   it('allows the distributor to receive 0%', () => {
     const result = calculateSplit(inputFor([0, 10000]))
     expect(result.members[0].listingAmount).toBe(result.netSale)
@@ -146,7 +169,7 @@ describe('calculateSplit', () => {
     expectCode(inputFor([percent, undefined]), 'INVALID_PERCENT')
   })
 
-  it.each([0, -1, 0.5, 10001, NaN, Infinity])('rejects invalid member percent %s', (percent) => {
+  it.each([-1, 0.5, 10001, NaN, Infinity])('rejects invalid member percent %s', (percent) => {
     expectCode(inputFor([undefined, percent]), 'INVALID_PERCENT')
   })
 

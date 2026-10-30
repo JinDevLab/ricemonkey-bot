@@ -57,7 +57,7 @@ export function calculateSplit(input: SplitInput): SplitResult {
   for (const [index, participant] of participants.entries()) {
     const percent = participant.percentHundredths
     if (percent !== undefined && (
-      !Number.isInteger(percent) || percent < (index === 0 ? 0 : 1) || percent > 10000
+      !Number.isInteger(percent) || percent < 0 || percent > 10000
     )) throw new SplitError('INVALID_PERCENT')
   }
 
@@ -76,7 +76,7 @@ export function calculateSplit(input: SplitInput): SplitResult {
   const denominator = 100n * totalWeight - 3n * weights[0]
   const shares = members.map((member, index) => {
     const listingAmount = netSale * 100n * weights[index + 1] / denominator
-    if (listingAmount === 0n) throw new SplitError('AMOUNT_TOO_SMALL')
+    if (weights[index + 1] > 0n && listingAmount === 0n) throw new SplitError('AMOUNT_TOO_SMALL')
     return {
       id: member.id,
       listingAmount,
