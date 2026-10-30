@@ -20,6 +20,18 @@ function reject(c: Context, content: string) {
   return c.flags('EPHEMERAL').res({ content, allowed_mentions: { parse: [], users: [] } })
 }
 
+function errorDetails(error: unknown, c: Context) {
+  const redact = (value: string) => {
+    for (const secret of [c.interaction.token, c.env.DISCORD_TOKEN, 'DISCORD_TOKEN']) {
+      if (secret) value = value.split(secret).join('[redacted]')
+    }
+    return value.replace(/https?:\/\/\S+/gi, '[url]')
+  }
+  return error instanceof Error
+    ? { name: redact(error.name), message: redact(error.message) }
+    : { name: 'UnknownError', message: 'Unknown failure' }
+}
+
 function guarded<C extends Context>(handler: (c: C) => Promise<Response>) {
   return async (c: C) => {
     try {
@@ -27,7 +39,7 @@ function guarded<C extends Context>(handler: (c: C) => Promise<Response>) {
     } catch (error) {
       if (error instanceof InputError) return reject(c, error.message)
       // Do not log exception objects: upstream errors can contain interaction tokens or SQL bindings.
-      console.error('interaction handler failed')
+      console.error('interaction handler failed', errorDetails(error, c))
       return reject(c, '잠시 후 다시 시도해 주세요')
     }
   }
@@ -94,9 +106,9 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
         try {
           const response = await c.rest('PUT', $channels$_$messages$_$reactions$_$me,
             [stored.split.channel_id, c.interaction.message.id, encodeURIComponent('✅')])
-          if (!response.ok) console.error('completion reaction failed', id)
+          if (!response.ok) console.error('completion reaction failed', { action: 'purchased', status: response.status })
         } catch {
-          console.error('completion reaction failed', id)
+          console.error('completion reaction failed', { action: 'purchased', status: null })
         }
       })())
     }
@@ -104,7 +116,7 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
       // discord-hono schedules this callback request with waitUntil and returns an empty HTTP 202.
       return c.update().res(data, undefined, async (response) => {
         if (!response.ok) {
-          console.error('interaction callback failed', id)
+          console.error('interaction callback failed', { action, status: response.status })
           return
         }
         try {
@@ -113,9 +125,9 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
               content: `<@${stored.split.distributor_id}> 파티원이 물건을 올렸어요. 분배 ${id}`,
               allowed_mentions: { parse: [], users: [stored.split.distributor_id] },
             })
-          if (!notification.ok) console.error('upload notification failed', id)
+          if (!notification.ok) console.error('upload notification failed', { action, status: notification.status })
         } catch {
-          console.error('upload notification failed', id)
+          console.error('upload notification failed', { action, status: null })
         }
       })
     }
