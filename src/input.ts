@@ -10,17 +10,17 @@ export const splitErrorMessages: Record<SplitErrorCode, string> = {
   INVALID_FEE: '판매 수수료는 3% 또는 5%만 선택할 수 있어요.',
   INVALID_MEMBER_COUNT: '파티원은 1명부터 5명까지 선택해 주세요.',
   DUPLICATE_PARTICIPANT: '파티원을 중복 선택하거나 분배자 본인을 넣을 수 없어요.',
-  INVALID_PERCENT: '퍼센트는 0~100 사이, 소수점 둘째 자리까지만 입력해 주세요.',
+  INVALID_PERCENT: '퍼센트는 0~100 사이, 소수점 둘째 자리까지 입력해 주세요. 끝에 % 하나를 붙여도 돼요.',
   PERCENT_SUM: '퍼센트 합계를 확인해 주세요. 모두 지정하면 100%, 일부만 지정하면 나머지 인원이 나눌 몫이 남아야 해요.',
   AMOUNT_TOO_SMALL: '판매금액이 너무 작아서 받을 몫이 있는 파티원의 올릴 금액이 0메소예요.',
 }
 
 export function parsePercent(value: unknown): number | undefined {
   if (value === undefined) return undefined
-  if (typeof value !== 'string' || !/^\d{1,3}(\.\d{1,2})?$/.test(value)) {
+  if (typeof value !== 'string' || !/^\d{1,3}(\.\d{1,2})?%?$/.test(value)) {
     throw new InputError(splitErrorMessages.INVALID_PERCENT)
   }
-  const [whole, fraction = ''] = value.split('.')
+  const [whole, fraction = ''] = value.replace(/%$/, '').split('.')
   const result = Number(whole) * 100 + Number(fraction.padEnd(2, '0'))
   if (result > 10000) throw new InputError(splitErrorMessages.INVALID_PERCENT)
   return result

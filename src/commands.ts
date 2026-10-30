@@ -4,7 +4,7 @@ const memberOptions: APIApplicationCommandBasicOption[] = Array.from({ length: 5
   type: 6, name: `파티원${i + 1}`, description: `분배받을 파티원 ${i + 1}`, required: i === 0,
 }))
 const percentOptions: APIApplicationCommandBasicOption[] = ['분배자', ...Array.from({ length: 5 }, (_, i) => `파티원${i + 1}`)].map((name) => ({
-  type: 3, name: `${name}퍼센트`, description: `${name} 몫 (0~100, 소수점 둘째 자리까지)`,
+  type: 3, name: `${name}퍼센트`, description: `${name} 몫 (0~100, 소수점 둘째 자리까지, % 생략 가능)`,
 }))
 
 export const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
