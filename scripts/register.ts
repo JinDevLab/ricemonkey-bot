@@ -1,5 +1,5 @@
-import { register } from 'discord-hono'
-import { commands } from '../src/commands.ts'
+import { inspectResponse, register } from 'discord-hono'
+import { registrationCommands } from '../src/commands.ts'
 
 const { DISCORD_APPLICATION_ID, DISCORD_TOKEN, DISCORD_GUILD_ID } = process.env
 if (!DISCORD_APPLICATION_ID || !DISCORD_TOKEN) {
@@ -7,9 +7,11 @@ if (!DISCORD_APPLICATION_ID || !DISCORD_TOKEN) {
   process.exitCode = 1
 } else {
   try {
-    const response = await register(commands, DISCORD_APPLICATION_ID, DISCORD_TOKEN, DISCORD_GUILD_ID || undefined, { silent: true })
+    const response = await register(registrationCommands(DISCORD_GUILD_ID), DISCORD_APPLICATION_ID, DISCORD_TOKEN, DISCORD_GUILD_ID || undefined, { silent: true })
     if (!response.ok) {
-      console.error(`명령 등록 실패 (HTTP ${response.status})`)
+      // inspectResponse.message contains response errors, not request headers. Still redact an echoed token.
+      const message = (await inspectResponse(response)).message.split(DISCORD_TOKEN).join('[redacted]')
+      console.error(`명령 등록 실패 (HTTP ${response.status}): ${message}`)
       process.exitCode = 1
     } else console.info('명령 등록을 완료했어요.')
   } catch {

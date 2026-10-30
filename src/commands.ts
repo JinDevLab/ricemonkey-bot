@@ -7,6 +7,10 @@ const percentOptions: APIApplicationCommandBasicOption[] = ['분배자', ...Arra
   type: 3, name: `${name}퍼센트`, description: `${name} 몫 (0~100, 소수점 둘째 자리까지, % 생략 가능)`,
 }))
 
+export function registrationCommands(guild?: string) {
+  return guild ? commands.map(({ contexts, integration_types, ...command }) => command) : commands
+}
+
 export const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
   {
     type: 1, name: '분배', description: '보스 리워드 판매금을 분배해요', contexts: [0], integration_types: [0],

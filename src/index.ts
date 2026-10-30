@@ -9,7 +9,6 @@ export interface Bindings {
   DB?: D1Database
   DISCORD_PUBLIC_KEY: string
   DISCORD_TOKEN?: string
-  DISCORD_APPLICATION_ID?: string
 }
 type Env = { Bindings: Bindings }
 type Context = CommandContext<Env> | ComponentContext<Env>
