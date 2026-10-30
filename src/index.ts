@@ -81,15 +81,16 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
     const db = database(c)
     const stored = await getSplit(db, id, guild)
     if (!stored) return reject(c, '분배를 찾을 수 없어요.')
-    if (stored.split.status !== 'active') return reject(c, '이미 완료되거나 취소된 분배예요.')
+    const member = stored.members.find((m) => m.user_id === user)
+    if (action === 'uploaded') {
+      if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 올렸어요를 누를 수 있어요.')
+    } else if (stored.split.distributor_id !== user) return reject(c, '분배자만 이 버튼을 누를 수 있어요.')
+    if (stored.split.status !== 'active') return c.update().res(renderSplit(stored))
     let completed = false
     let changed = false
     if (action === 'uploaded') {
-      const member = stored.members.find((m) => m.user_id === user)
-      if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 올렸어요를 누를 수 있어요.')
       changed = await markUploaded(db, id, guild, user)
     } else {
-      if (stored.split.distributor_id !== user) return reject(c, '분배자만 이 버튼을 누를 수 있어요.')
       if (action === 'cancel') changed = await cancelSplit(db, id, guild, user)
       else {
         const result = await markPurchased(db, id, guild, user, target)
@@ -97,10 +98,10 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
         completed = result.completed
       }
     }
-    if (!changed) return reject(c, '이미 처리되었거나 더 이상 처리할 수 없는 버튼이에요.')
     const latest = await getSplit(db, id, guild)
     if (!latest) throw new Error('Split disappeared')
     const data = renderSplit(latest)
+    if (!changed) return c.update().res(data)
     if (completed && c.env.DISCORD_TOKEN) {
       c.executionCtx.waitUntil((async () => {
         try {
