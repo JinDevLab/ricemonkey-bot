@@ -16,7 +16,7 @@ type Context = CommandContext<Env> | ComponentContext<Env>
 const app = new DiscordHono<Env>()
 
 function reject(c: Context, content: string) {
-  if ('update' in c) c.update(false)
+  if (c.interaction.type === 3) (c as ComponentContext<Env>).update(false)
   return c.flags('EPHEMERAL').res({ content, allowed_mentions: { parse: [], users: [] } })
 }
 
