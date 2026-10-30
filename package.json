@@ -10,7 +10,8 @@
     "dev": "wrangler dev",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "register": "node --env-file-if-exists=.dev.vars scripts/register.ts"
   },
   "dependencies": {
     "discord-hono": "0.23.0",
