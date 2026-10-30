@@ -7,6 +7,7 @@
     {
       "binding": "DB",
       "database_name": "ricemonkey-bot",
+      "migrations_dir": "migrations",
       // PLACEHOLDER: fill database_id after running wrangler d1 create ricemonkey-bot.
       "database_id": "00000000-0000-0000-0000-000000000000"
     }
