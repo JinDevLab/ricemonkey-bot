@@ -139,11 +139,17 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
 // The library's callback transport has no rejection branch. Keep background failures contained
 // without logging REST error objects (which can expose tokens).
 const fetchInteraction = app.fetch
-app.fetch = (request, env, executionCtx, option) => fetchInteraction(request, env, executionCtx ? {
-  waitUntil: (promise: Promise<unknown>) => executionCtx.waitUntil(promise.catch(() => {
-    console.error('background interaction request failed')
-  })),
-  passThroughOnException: () => executionCtx.passThroughOnException(),
-} : undefined, option)
+app.fetch = (request, env, executionCtx, option) => {
+  const signature = request.headers.get('x-signature-ed25519')
+  if (request.method === 'POST' && signature !== null && !/^[\da-f]{128}$/i.test(signature)) {
+    return Promise.resolve(new Response('Bad Request', { status: 401 }))
+  }
+  return fetchInteraction(request, env, executionCtx ? {
+    waitUntil: (promise: Promise<unknown>) => executionCtx.waitUntil(promise.catch(() => {
+      console.error('interaction callback failed', { action: 'uploaded', status: null })
+    })),
+    passThroughOnException: () => executionCtx.passThroughOnException(),
+  } : undefined, option)
+}
 
 export default app
