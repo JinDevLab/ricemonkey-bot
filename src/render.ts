@@ -60,15 +60,21 @@ export function renderSplit({ split: s, members }: StoredSplit): APIInteractionR
 }
 
 export function renderUnfinished({ upload, purchase }: { upload: PendingRow[]; purchase: PendingRow[] }): APIInteractionResponseCallbackData {
+  const ids = [...new Set([...upload.slice(0, 10), ...purchase.slice(0, 10)].map((m) => m.id))]
   const lines = (items: PendingRow[], uploading: boolean) => [
     ...items.slice(0, 10).map((m) => [
+      `${ids.indexOf(m.id) + 1}번`,
       uploading ? `<@${m.distributor_id}> · 경매장 등록가: ${listingMoney(m.listing_amount)}`
         : `<@${m.user_id}> · ${memberStatus[m.status]}\n아이템: **${item(m)}**\n경매장 등록가: ${listingMoney(m.listing_amount)}`,
       `<#${m.channel_id}> · ${date(m.created_at)}`,
     ].join('\n')),
     ...(items.length > 10 ? ['더 있어요. 먼저 오래된 건부터 처리해 주세요.'] : []),
   ].join('\n\n') || '없어요.'
-  return { allowed_mentions: { parse: [], users: [] }, embeds: [
+  return { allowed_mentions: { parse: [], users: [] },
+    ...(ids.length ? { components: [{ type: 1 as const, components: [{ type: 3 as const, custom_id: 'repost',
+      placeholder: '카드를 다시 올릴 분배 선택',
+      options: ids.map((id, i) => ({ label: `${i + 1}번 카드 다시 올리기`, value: id })),
+    }] }] } : {}), embeds: [
     { title: '📦 내가 등록해야 하는 건', color: colors.active, description: lines(upload, true) },
     { title: '🛒 내가 구매해야 하는 건', color: colors.active, description: lines(purchase, false) },
   ] }

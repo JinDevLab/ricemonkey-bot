@@ -170,6 +170,20 @@ for (const name of ['미완료', '내역']) {
   }))
 }
 
+app.component('repost', guarded<ComponentContext<Env>>(async (c) => {
+  const guild = c.interaction.guild_id
+  const user = c.interaction.member?.user.id
+  if (!guild || !user) return reject(c, '서버 안에서 사용해 주세요.')
+  const id = c.interaction.data.component_type === 3 ? c.interaction.data.values[0] : undefined
+  const stored = id ? await getSplit(database(c), id, guild) : null
+  if (!stored) return reject(c, '분배를 찾을 수 없어요.')
+  if (stored.split.distributor_id !== user && !stored.members.some((m) => m.user_id === user && m.status !== 'excluded')) {
+    return reject(c, '이 분배의 참여자만 카드를 다시 올릴 수 있어요.')
+  }
+  if (stored.split.status !== 'active') return reject(c, '이미 끝난 분배예요.')
+  return c.update(false).res({ ...renderSplit(stored), allowed_mentions: { parse: [], users: [] } })
+}))
+
 for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
   app.component(action, guarded<ComponentContext<Env>>(async (c) => {
     const guild = c.interaction.guild_id
@@ -215,7 +229,7 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
       c.executionCtx.waitUntil((async () => {
         try {
           const response = await c.rest('PUT', $channels$_$messages$_$reactions$_$me,
-            [stored.split.channel_id, c.interaction.message.id, encodeURIComponent('✅')])
+            [c.interaction.channel_id, c.interaction.message.id, encodeURIComponent('✅')])
           if (!response.ok) console.error('completion reaction failed', { action: 'purchased', status: response.status })
         } catch {
           console.error('completion reaction failed', { action: 'purchased', status: null })

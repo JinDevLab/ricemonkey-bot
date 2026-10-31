@@ -134,7 +134,7 @@ async function ephemeral(payload: unknown, message?: string) {
   expect(response.type).toBe(4)
   expect(response.data.flags).toBe(64)
   if (message) expect(response.data.content).toBe(message)
-  expect(response.data.components).toBeUndefined()
+  if ((payload as any).data?.name !== '미완료') expect(response.data.components).toBeUndefined()
   return response.data
 }
 async function redraw(payload: unknown) {
@@ -144,6 +144,53 @@ async function redraw(payload: unknown) {
   return response.data
 }
 const defaults = { 총판매금액: 100000000, 수수료: 5, 파티원1: first }
+
+describe('reposting cards', () => {
+  function repost(id: string, user = distributor, guild = 'guild') {
+    return { ...component('unused', '', user, undefined, guild), data: { component_type: 3, custom_id: 'repost', values: [id] } }
+  }
+  it('numbers unique splits across queues, limits options to twenty and omits empty components', () => {
+    const pending = { id: 'same', user_id: first, distributor_id: distributor, channel_id: 'channel', listing_amount: 1, item_name: null, status: 'pending' as const, created_at: new Date().toISOString() }
+    const duplicate = renderUnfinished({ upload: [pending], purchase: [pending, pending] })
+    expect(duplicate.components).toMatchObject([{ components: [{ custom_id: 'repost', placeholder: '카드를 다시 올릴 분배 선택', options: [{ label: '1번 카드 다시 올리기', value: 'same' }] }] }])
+    expect(duplicate.embeds![1].description!.match(/1번/g)).toHaveLength(2)
+    const queues = renderUnfinished({ upload: Array.from({ length: 11 }, (_, i) => ({ ...pending, id: `u${i}` })), purchase: Array.from({ length: 11 }, (_, i) => ({ ...pending, id: `p${i}` })) })
+    expect((queues.components![0] as any).components[0].options).toHaveLength(20)
+    expect(renderUnfinished({ upload: [], purchase: [] }).components).toBeUndefined()
+  })
+  it('allows participants, denies excluded/outsider/cross-guild/terminal and posts a silent public card', async () => {
+    const id = await create({ ...defaults, 파티원2: second, 파티원2퍼센트: '0' })
+    for (const user of [distributor, first]) {
+      const response = await json(repost(id, user))
+      expect(response.type).toBe(4)
+      expect(response.data.flags).toBeUndefined()
+      expect(response.data.allowed_mentions).toEqual({ parse: [], users: [] })
+      expect(response.data.components[0].components[0].custom_id).toBe(`uploaded;${id}`)
+    }
+    for (const user of [second, 'outsider']) await ephemeral(repost(id, user), '이 분배의 참여자만 카드를 다시 올릴 수 있어요.')
+    await ephemeral(repost(id, first, 'other'), '분배를 찾을 수 없어요.')
+    const dm = repost(id)
+    delete (dm as any).guild_id
+    await ephemeral(dm, '서버 안에서 사용해 주세요.')
+    await cancelSplit(db, id, 'guild', distributor)
+    await ephemeral(repost(id), '이미 끝난 분배예요.')
+    await db.prepare("UPDATE splits SET status = 'completed' WHERE id = ?").bind(id).run()
+    await ephemeral(repost(id), '이미 끝난 분배예요.')
+  })
+  it('keeps old and new buttons usable and reacts in the clicked channel', async () => {
+    const id = await create()
+    await json(repost(id))
+    await json(component('uploaded', id, first))
+    await json(await modal(id))
+    const fetch = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', fetch)
+    const clicked = { ...component('purchased', id, distributor, first), channel_id: 'reposted-channel' }
+    await request(clicked, true)
+    await Promise.all(background)
+    expect(fetch.mock.calls.some((args: any[]) => String(args[0]).includes('/channels/reposted-channel/messages/message/reactions/'))).toBe(true)
+    await redraw(component('purchased', id, distributor, first))
+  })
+})
 
 describe('expired splits', () => {
   it.each([
@@ -983,8 +1030,8 @@ describe('message amount formatting', () => {
     const timestamp = `<t:${Date.parse(created_at) / 1000}:d>`
     const pending = { ...stored.members[0], ...stored.split, user_id: first, status: 'uploaded' as const, item_name: '장갑', created_at }
     const queues = renderUnfinished({ upload: [pending], purchase: [pending] })
-    expect(queues.embeds![0].description).toBe(`<@100> · 경매장 등록가: **2억4619만2893 메소** (246192893)\n<#channel> · ${timestamp}`)
-    expect(queues.embeds![1].description).toBe(`<@200> · 📦 등록 완료\n아이템: **장갑**\n경매장 등록가: **2억4619만2893 메소** (246192893)\n<#channel> · ${timestamp}`)
+    expect(queues.embeds![0].description).toBe(`1번\n<@100> · 경매장 등록가: **2억4619만2893 메소** (246192893)\n<#channel> · ${timestamp}`)
+    expect(queues.embeds![1].description).toBe(`1번\n<@200> · 📦 등록 완료\n아이템: **장갑**\n경매장 등록가: **2억4619만2893 메소** (246192893)\n<#channel> · ${timestamp}`)
     for (const embed of queues.embeds!) expect(embed.description!.match(/\((\d+)\)/)?.[1]).toBe(String(pending.listing_amount))
     expect(renderHistory([{ ...stored.split, created_at, my_share: stored.members[0].expected_receipt }]).embeds![0].description)
       .toBe(`${timestamp} · 분배자 <@100>\n총판매액: 5억0000만0000 메소\n내 실수령액: 2억3880만7106 메소 · 🔵 진행 중`)
