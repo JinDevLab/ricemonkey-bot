@@ -3,7 +3,7 @@ import type { CommandContext, ComponentContext, ModalContext } from 'discord-hon
 import type { APIChatInputApplicationCommandInteraction } from 'discord-api-types/v10'
 import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, unfinished } from './db'
 import { buildSplit, InputError } from './input'
-import { escapeItemName, listingMoney, renderHistory, renderSplit, renderUnfinished } from './render'
+import { escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from './render'
 
 export interface Bindings {
   DB?: D1Database
@@ -49,6 +49,30 @@ function database(c: Context) {
   return c.env.DB
 }
 
+function updateWithNotification(
+  c: ComponentContext<Env> | ModalContext<Env>,
+  data: ReturnType<typeof renderSplit>,
+  action: 'uploaded' | 'purchased',
+  content: string,
+  recipient: string,
+) {
+  if (!c.env.DISCORD_TOKEN) return c.update().res(data)
+  return c.update().res(data, undefined, async (response) => {
+    if (!response.ok) {
+      console.error('interaction callback failed', { action, status: response.status })
+      return
+    }
+    try {
+      const notification = await c.rest('POST', $webhooks$_$_, [c.interaction.application_id, c.interaction.token], {
+        content, allowed_mentions: { parse: [], users: [recipient] },
+      })
+      if (!notification.ok) console.error(`${action === 'uploaded' ? 'upload' : 'purchase'} notification failed`, { action, status: notification.status })
+    } catch {
+      console.error(`${action === 'uploaded' ? 'upload' : 'purchase'} notification failed`, { action, status: null })
+    }
+  })
+}
+
 app.command('분배', guarded<CommandContext<Env>>(async (c) => {
   const stored = buildSplit(c.interaction as APIChatInputApplicationCommandInteraction)
   await createSplit(database(c), stored)
@@ -82,14 +106,17 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
     if (!stored) return reject(c, '분배를 찾을 수 없어요.')
     const member = stored.members.find((m) => m.user_id === user)
     if (action === 'uploaded') {
-      if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
+      if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
     } else if (stored.split.distributor_id !== user) return reject(c, '분배자만 이 버튼을 누를 수 있어요.')
     if (stored.split.status !== 'active') return c.update().res(renderSplit(stored))
+    if (action === 'purchased' && stored.members.find((m) => m.user_id === target)?.status === 'pending') {
+      return reject(c, '파티원이 아직 경매장 등록을 하지 않았어요.')
+    }
     let completed = false
     let changed = false
     if (action === 'uploaded') {
       if (member!.status === 'purchased') return c.update().res(renderSplit(stored))
-      return c.resModal({ custom_id: `item;${id}`, title: '아이템 등록', components: [{
+      return c.resModal({ custom_id: `item;${id}`, title: '경매장 등록', components: [{
         type: 1, components: [{ type: 4, custom_id: 'item_name', label: '등록한 아이템', style: 1,
           required: true, max_length: 100, ...(member!.item_name ? { value: member!.item_name } : {}) }],
       }] })
@@ -116,6 +143,12 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
         }
       })())
     }
+    if (action === 'purchased') {
+      const purchased = latest.members.find((m) => m.user_id === target)!
+      const text = purchased.item_name === null ? '등록한 아이템을 구매했어요' : `**${escapeItemName(purchased.item_name)}** 구매했어요`
+      return updateWithNotification(c, data, action,
+        `<@${target}> <@${user}>님이 ${text} · 실수령액: ${money(purchased.expected_receipt)}`, target)
+    }
     return c.update().res(data)
   }))
 }
@@ -127,12 +160,12 @@ app.modal('item', guarded<ModalContext<Env>>(async (c) => {
   const id = c.ref.custom_value
   if (!id || id.includes(';')) return reject(c, '잘못된 분배 입력창이에요.')
   // Type 7 is only usable for a modal opened from a message component.
-  if (!c.interaction.message) return reject(c, '안내 메시지의 아이템 등록 버튼을 다시 눌러 주세요.')
+  if (!c.interaction.message) return reject(c, '안내 메시지의 경매장 등록 버튼을 다시 눌러 주세요.')
   const db = database(c)
   const stored = await getSplit(db, id, guild)
   if (!stored) return reject(c, '분배를 찾을 수 없어요.')
   const member = stored.members.find((m) => m.user_id === user)
-  if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
+  if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
   if (stored.split.status !== 'active' || member.status === 'purchased') return c.update().res(renderSplit(stored))
   const raw = c.get('item_name')
   const itemName = typeof raw === 'string' ? raw.replace(/[\r\n]+/g, ' ').trim() : ''
@@ -142,25 +175,11 @@ app.modal('item', guarded<ModalContext<Env>>(async (c) => {
   if (!latest) throw new Error('Split disappeared')
   const data = renderSplit(latest)
   if (!changed || !c.env.DISCORD_TOKEN) return c.update().res(data)
-  const action = 'uploaded'
-  // Keep the existing callback-before-followup transport and diagnostic shape.
-  return c.update().res(data, undefined, async (response) => {
-    if (!response.ok) {
-      console.error('interaction callback failed', { action, status: response.status })
-      return
-    }
-    try {
-      const name = escapeItemName(itemName)
-      const text = member.status === 'pending' ? `**${name}** 등록했어요` : `아이템을 **${name}**(으)로 수정했어요`
-      const notification = await c.rest('POST', $webhooks$_$_, [c.interaction.application_id, c.interaction.token], {
-        content: `<@${stored.split.distributor_id}> <@${user}>님이 ${text} · 경매장 등록가: ${listingMoney(member.listing_amount)}`,
-        allowed_mentions: { parse: [], users: [stored.split.distributor_id] },
-      })
-      if (!notification.ok) console.error('upload notification failed', { action, status: notification.status })
-    } catch {
-      console.error('upload notification failed', { action, status: null })
-    }
-  })
+  const name = escapeItemName(itemName)
+  const text = member.status === 'pending' ? `**${name}** 등록했어요` : `아이템을 **${name}**(으)로 수정했어요`
+  return updateWithNotification(c, data, 'uploaded',
+    `<@${stored.split.distributor_id}> <@${user}>님이 ${text} · 경매장 등록가: ${listingMoney(member.listing_amount)}`,
+    stored.split.distributor_id)
 }))
 
 // The library's callback transport has no rejection branch. Keep background failures contained
@@ -173,7 +192,7 @@ app.fetch = (request, env, executionCtx, option) => {
   }
   return fetchInteraction(request, env, executionCtx ? {
     waitUntil: (promise: Promise<unknown>) => executionCtx.waitUntil(promise.catch(() => {
-      console.error('interaction callback failed', { action: 'uploaded', status: null })
+      console.error('interaction callback failed', { status: null })
     })),
     passThroughOnException: () => executionCtx.passThroughOnException(),
   } : undefined, option)

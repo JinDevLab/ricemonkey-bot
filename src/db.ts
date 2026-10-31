@@ -75,7 +75,7 @@ export async function markPurchased(db: D1Database, id: string, guild: string, d
   const now = new Date().toISOString()
   const [member, completed] = await db.batch([
     db.prepare(`UPDATE split_members SET status = 'purchased', purchased_at = ?
-      WHERE split_id = ? AND user_id = ? AND status IN ('pending', 'uploaded')
+      WHERE split_id = ? AND user_id = ? AND status = 'uploaded'
       AND EXISTS (SELECT 1 FROM splits WHERE id = ? AND guild_id = ?
         AND distributor_id = ? AND status = 'active')`).bind(now, id, user, id, guild, distributor),
     db.prepare(`UPDATE splits SET status = 'completed', completed_at = ?
