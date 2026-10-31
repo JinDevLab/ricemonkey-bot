@@ -165,24 +165,37 @@ describe('private thread splits', () => {
   function openButton() {
     return { ...privateInput(), type: 3, data: { component_type: 2, custom_id: 'private-split' } }
   }
-  function mockRest(fail = '', network = false) {
-    const calls: { url: string; method: string; body: any }[] = []
+  type RestCall = { url: string; method: string; body: any }
+  function expectPrivateFailure(calls: RestCall[], response?: any) {
+    expect(calls.filter((c) => c.method === 'POST' && c.url.endsWith('/channels/channel/messages'))).toHaveLength(0)
+    expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/webhooks/'))).toHaveLength(0)
+    const replies = calls.filter((c) => c.method === 'PATCH' && c.url.endsWith('/messages/@original')).map((c) => c.body)
+    if (response) replies.push(response.data)
+    for (const body of replies) {
+      expect(body).not.toHaveProperty('embeds')
+      expect(JSON.stringify(body)).not.toMatch(/메소|100000000|100,000,000|95000000|95,000,000|1억0000만0000|48223350|4822만3350|4677665[09]|4677만6650|4677만6649|비공개 아이템|장갑/)
+      expect(body.allowed_mentions).toEqual({ parse: [], users: [] })
+    }
+  }
+  function mockRest(fail = '', network = false, status = 403, threadBody?: string) {
+    const calls: RestCall[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
       calls.push({ url, method: init.method!, body: init.body ? JSON.parse(init.body as string) : null })
       if (fail && url.includes(fail)) {
         if (network) throw new Error('secret fake-token fake-bot-token 100000000')
-        return new Response('{}', { status: 403 })
+        return new Response('{}', { status })
       }
-      return new Response(JSON.stringify(url.endsWith('/threads') ? { id: thread, type: 12 } : {}))
+      return new Response(url.endsWith('/threads') && threadBody !== undefined ? threadBody : JSON.stringify(url.endsWith('/threads') ? { id: thread, type: 12 } : {}))
     }))
     vi.spyOn(console, 'error').mockImplementation(() => {})
     return calls
   }
-  async function submit(fail = '', network = false) {
-    const calls = mockRest(fail, network)
+  async function submit(fail = '', network = false, status = 403, threadBody?: string) {
+    const calls = mockRest(fail, network, status, threadBody)
     const response = await json(privateInput(), true)
     expect(response).toEqual({ type: 5, data: { flags: 64 } })
     await Promise.all(background)
+    expectPrivateFailure(calls)
     return calls
   }
   async function count() { return db.prepare('SELECT COUNT(*) AS n FROM splits').first('n') }
@@ -197,8 +210,10 @@ describe('private thread splits', () => {
     expect(commands.find((c) => c.name === '분배패널')).toMatchObject({ contexts: [0], integration_types: [0] })
   })
   it.each([1, 2, 5, 11, 12, 15])('rejects channel type %s at all entry points', async (type) => {
+    const calls = mockRest()
     for (const payload of [panel(), openButton(), privateInput()]) {
       const response = await json({ ...payload, channel: { type } }, true)
+      expectPrivateFailure(calls, response)
       expect(response).toMatchObject({ type: 4, data: { flags: 64 } })
       expect(response.data.content).toContain('일반 텍스트')
     }
@@ -209,13 +224,16 @@ describe('private thread splits', () => {
     for (const payload of [panel(), openButton(), privateInput()]) {
       const response = await json({ ...payload, app_permissions: '0' }, true)
       expect(response.data.flags).toBe(64)
+      expectPrivateFailure([], response)
       for (const name of ['채널 보기', '비공개 스레드 만들기', '스레드에서 메시지 보내기', '링크 첨부', '메시지 기록 보기', '반응 추가']) expect(response.data.content).toContain(name)
     }
     expect(fetch).not.toHaveBeenCalled()
   })
   it.each([[10, '채널 보기'], [36, '비공개 스레드 만들기'], [38, '스레드에서 메시지 보내기'],
     [14, '링크 첨부'], [16, '메시지 기록 보기'], [6, '반응 추가']] as const)('identifies a missing permission bit %s', async (bit, name) => {
+    const calls = mockRest()
     const response = await json({ ...panel(), app_permissions: String(BigInt(permissions) & ~(1n << BigInt(bit))) })
+    expectPrivateFailure(calls, response)
     expect(response.data.flags).toBe(64)
     expect(response.data.content).toBe(`봇 권한이 부족해요: ${name}. 채널 권한을 확인해 주세요.`)
   })
@@ -237,6 +255,7 @@ describe('private thread splits', () => {
     const fetch = vi.fn()
     vi.stubGlobal('fetch', fetch)
     const response = await json(payload, kind !== 'token')
+    expectPrivateFailure([], response)
     expect(response).toMatchObject({ type: 4, data: { flags: 64 } })
     expect(fetch).not.toHaveBeenCalled()
     expect(await count()).toBe(0)
@@ -245,17 +264,66 @@ describe('private thread splits', () => {
     const calls = await submit(path)
     expect(await count()).toBe(0)
     expect(await db.prepare('SELECT COUNT(*) AS n FROM split_members').first('n')).toBe(0)
-    expect(calls.filter((c) => c.url.includes('/messages') && c.method === 'POST').every((c) => c.url.endsWith(`/channels/${thread}/messages`))).toBe(true)
+    const content = calls.at(-1)!.body.content
+    expect(content).toContain('/분배를 쓰면 채널에 공개')
+    if (path === '/threads') {
+      expect(content).toContain('스레드를 만들지 못했어요')
+      expect(content).toContain('봇 권한')
+      expect(content).not.toContain('빈 스레드')
+    } else {
+      expect(content).not.toContain('스레드를 만들지 못했어요')
+      expect(content).toContain('빈 스레드')
+      expect(content).toContain(path.includes('thread-members') ? '님을 추가하지 못해 분배를 만들지 않았어요' : '카드를 올리지 못해 분배를 만들지 않았어요')
+    }
     if (path.includes('thread-members')) expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/messages'))).toBe(false)
-    expect(calls.at(-1)!.body.content).toContain('스레드를 만들지 못했어요')
-    expect(calls.at(-1)!.body.content).toContain('/분배를 쓰면 채널에 공개')
-    expect(calls.at(-1)!.body).not.toHaveProperty('embeds')
   })
-  it('contains background exceptions and keeps logs free of payloads', async () => {
-    const calls = await submit(`/thread-members/${first}`, true)
+  it.each([429, 500, 'network'] as const)('handles card post %s according to certainty', async (failure) => {
+    const remove = vi.spyOn(databaseModule, 'deleteSplit')
+    const calls = await submit(`/channels/${thread}/messages`, failure === 'network', typeof failure === 'number' ? failure : 403)
+    const content = calls.at(-1)!.body.content
+    if (failure === 429) {
+      expect(await count()).toBe(0)
+      expect(remove).toHaveBeenCalledOnce()
+      expect(content).toContain('카드를 올리지 못해 분배를 만들지 않았어요')
+      expect(content).toContain('빈 스레드')
+      expect(content).toContain('/분배를 쓰면 채널에 공개')
+    } else {
+      expect(await count()).toBe(1)
+      expect(remove).not.toHaveBeenCalled()
+      expect(content).toContain('게시 결과를 확인하지 못했어요')
+      expect(content).toContain(`<#${thread}>`)
+      expect(content).toContain('카드가 없으면 /미완료')
+      expect(content).not.toContain('빈 스레드')
+    }
+  })
+  it.each(['channel', 'app_permissions', 'both'] as const)('does not falsely reject missing %s in modal payloads', async (field) => {
+    const payload: any = privateInput()
+    if (field !== 'app_permissions') delete payload.channel
+    if (field !== 'channel') delete payload.app_permissions
+    const calls = mockRest('/threads')
+    expect(await json(payload, true)).toEqual({ type: 5, data: { flags: 64 } })
+    await Promise.all(background)
+    expect(calls[0].url).toContain('/threads')
+    expectPrivateFailure(calls)
+  })
+  it('rejects a missing DB binding before defer or REST', async () => {
+    const calls = mockRest()
+    const response = await (await request(privateInput(), true, null)).json()
+    expect(response).toMatchObject({ type: 4, data: { flags: 64, content: '잠시 후 다시 시도해 주세요' } })
+    expect(calls).toHaveLength(0)
+    expect(background).toHaveLength(0)
+    expectPrivateFailure(calls, response)
+  })
+  it.each(['/threads', `/thread-members/${distributor}`, `/thread-members/${first}`])('contains network failure at %s and keeps logs free of payloads', async (path) => {
+    const calls = await submit(path, true)
     expect(await count()).toBe(0)
-    expect(calls.at(-1)!.body.content).toContain(`<@${first}>`)
-    expect(console.error).toHaveBeenCalledWith('private thread member add', { status: null })
+    if (path === '/threads') {
+      expect(calls.at(-1)!.body.content).not.toContain('빈 스레드')
+      expect(console.error).toHaveBeenCalledWith('private thread create', { status: null })
+    } else {
+      expect(calls.at(-1)!.body.content).toContain(`<@${path.split('/').at(-1)}>`)
+      expect(console.error).toHaveBeenCalledWith('private thread member add', { status: null })
+    }
     expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toMatch(/fake-token|fake-bot-token|100000000/)
   })
   it('keeps recoverable rows if rollback fails and explains unfinished recovery', async () => {
@@ -292,6 +360,7 @@ describe('private thread splits', () => {
   it.each([false, true])('reposts privately from another channel (failure=%s)', async (failure) => {
     await submit()
     const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
+    await markUploaded(db, id, 'guild', first, '비공개 아이템')
     const calls = mockRest(failure ? `/channels/${thread}/messages` : '')
     expect(await json(repost(id), true)).toEqual({ type: 5, data: { flags: 64 } })
     await Promise.all(background)
@@ -299,13 +368,26 @@ describe('private thread splits', () => {
     expect(calls[0].body.allowed_mentions).toEqual({ parse: [], users: [] })
     expect(calls[1].body).not.toHaveProperty('embeds')
     expect(calls[1].body.content).toContain(failure ? '다시 올리지 못했어요' : `<#${thread}>`)
+    expectPrivateFailure(calls)
     const noToken = await json(repost(id))
+    expectPrivateFailure(calls, noToken)
     expect(noToken).toMatchObject({ type: 4, data: { flags: 64 } })
     expect(noToken.data).not.toHaveProperty('embeds')
     const inside = await json(repost(id, thread))
     expect(inside.type).toBe(4)
     expect(inside.data.flags).toBeUndefined()
     expect(inside.data.allowed_mentions).toEqual({ parse: [], users: [] })
+  })
+  it('contains private repost network failure without leaking stored item names', async () => {
+    await submit()
+    const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
+    await markUploaded(db, id, 'guild', first, '비공개 아이템')
+    const calls = mockRest(`/channels/${thread}/messages`, true)
+    expect(await json(repost(id), true)).toEqual({ type: 5, data: { flags: 64 } })
+    await Promise.all(background)
+    expectPrivateFailure(calls)
+    expect(calls.at(-1)!.body.content).toContain('다시 올리지 못했어요')
+    expect(await count()).toBe(1)
   })
   it('keeps thread buttons, notifications and completion reactions in the original interaction flow', async () => {
     await submit()
@@ -332,12 +414,28 @@ describe('private thread splits', () => {
     expect((await getSplit(db, id, 'guild'))!.split.status).toBe('completed')
     expect(calls.some((c) => c.method === 'DELETE' || c.url.endsWith('/channels/channel/messages'))).toBe(false)
   })
-  it('does not post a card or persist partial rows when saving fails', async () => {
-    vi.spyOn(databaseModule, 'createSplit').mockRejectedValueOnce(new Error('100000000 fake-token'))
+  it.each([[false, false], [false, true], [true, false], [true, true]])('cleans up a save failure (delete fails=%s, committed=%s)', async (deleteFails, committed) => {
+    const save = databaseModule.createSplit
+    vi.spyOn(databaseModule, 'createSplit').mockImplementationOnce(async (...args) => {
+      if (committed) await save(...args)
+      throw new Error('100000000 fake-token')
+    })
+    const remove = vi.spyOn(databaseModule, 'deleteSplit')
+    if (deleteFails) remove.mockRejectedValueOnce(new Error('sensitive'))
     const calls = await submit()
-    expect(await count()).toBe(0)
+    expect(remove).toHaveBeenCalledOnce()
+    expect(await count()).toBe(deleteFails && committed ? 1 : 0)
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/messages'))).toBe(false)
-    expect(calls.at(-1)!.body.content).toContain('스레드를 만들지 못했어요')
+    const content = calls.at(-1)!.body.content
+    expect(content).not.toContain('스레드를 만들지 못했어요')
+    if (deleteFails) {
+      expect(content).toContain('저장 결과를 확인하지 못했어요')
+      expect(content).toContain('/미완료에 보이면')
+    } else {
+      expect(content).toContain('분배를 저장하지 못했어요')
+      expect(content).toContain('빈 스레드')
+      expect(content).toContain('/분배를 쓰면 채널에 공개')
+    }
     expect(console.error).toHaveBeenCalledWith('private split save', { status: null })
   })
   it.each([false, true])('contains delayed response failure without public fallback (network=%s)', async (network) => {
@@ -346,17 +444,13 @@ describe('private thread splits', () => {
     expect(calls).toHaveLength(5)
     expect(console.error).toHaveBeenCalledWith('private response failed', { status: network ? null : 403 })
   })
-  it('refuses an unexpected non-private thread response before invites or card posts', async () => {
-    const calls: string[] = []
-    vi.spyOn(console, 'error').mockImplementation(() => {})
-    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-      calls.push(url)
-      return new Response(JSON.stringify({ id: 'channel', type: 0 }))
-    }))
-    expect(await json(privateInput(), true)).toEqual({ type: 5, data: { flags: 64 } })
-    await Promise.all(background)
+  it.each(['{invalid', JSON.stringify({ id: 'channel', type: 0 })])('refuses invalid thread response %s before invites or cards', async (body) => {
+    const calls = await submit('', false, 403, body)
     expect(calls).toHaveLength(2)
-    expect(calls[1]).toContain('/messages/@original')
+    expect(calls[1].url).toContain('/messages/@original')
+    expect(calls[1].body.content).toContain('스레드를 만들지 못했어요')
+    expect(calls[1].body.content).toContain('봇 권한')
+    expect(calls[1].body.content).not.toContain('빈 스레드')
     expect(await count()).toBe(0)
   })
   it('caps the thread name and allows a known ViewChannel permission', async () => {

@@ -99,7 +99,8 @@ function splitModal(custom_id: string, title: string): APIModalInteractionRespon
 
 app.command('분배', guarded<CommandContext<Env>>(async (c) => c.resModal(splitModal('split', '분배'))))
 
-const privateFailure = '비공개 분배 스레드를 만들지 못했어요. /분배를 쓰면 채널에 공개돼요.'
+const publicSplitNotice = '/분배를 쓰면 채널에 공개돼요.'
+const privateFailure = `비공개 분배 스레드를 만들지 못했어요. 봇 권한을 확인해 주세요. ${publicSplitNotice}`
 const threadPermissions = [
   [PermissionFlagsBits.ViewChannel, '채널 보기'],
   [PermissionFlagsBits.CreatePrivateThreads, '비공개 스레드 만들기'],
@@ -110,8 +111,10 @@ const threadPermissions = [
 ] as const
 
 function checkPrivateChannel(c: Context) {
-  if (c.interaction.channel?.type !== 0) throw new InputError('일반 텍스트 채널에서만 비공개 분배를 만들 수 있어요.')
-  const permissions = BigInt(c.interaction.app_permissions ?? '0')
+  // Advisory only: REST failures enforce access, with no public fallback.
+  if (c.interaction.channel?.type !== undefined && c.interaction.channel.type !== 0) throw new InputError('일반 텍스트 채널에서만 비공개 분배를 만들 수 있어요.')
+  if (c.interaction.app_permissions === undefined) return
+  const permissions = BigInt(c.interaction.app_permissions)
   const missing = threadPermissions.filter(([bit]) => (permissions & bit) === 0n).map(([, name]) => name)
   if (missing.length) throw new InputError(`봇 권한이 부족해요: ${missing.join(', ')}. 채널 권한을 확인해 주세요.`)
 }
@@ -151,12 +154,11 @@ app.modal('private-split', guarded<ModalContext<Env>>(async (c) => {
       return reject(c, `<@${member.user_id}>님에게 이 채널을 볼 권한이 없어요.`)
     }
   }
+  const db = database(c)
   return c.update(false).flags('EPHEMERAL').resDefer(async () => {
     let action = 'private thread create'
     let status: number | null = null
-    let saved = false
-    let cardPosted = false
-    let failure = `${privateFailure} 빈 스레드가 남을 수 있어요.`
+    let failure = privateFailure
     try {
       const user = c.interaction.member!
       const name = user.nick ?? user.user.global_name ?? user.user.username
@@ -173,33 +175,36 @@ app.modal('private-split', guarded<ModalContext<Env>>(async (c) => {
       stored.split.private_thread = 1
       for (const id of [stored.split.distributor_id, ...stored.members.map((m) => m.user_id)]) {
         action = 'private thread member add'
-        failure = `${privateFailure} <@${id}>님을 추가하지 못했어요. 빈 스레드가 남을 수 있어요.`
+        failure = `<@${id}>님을 추가하지 못해 분배를 만들지 않았어요. 빈 스레드가 남을 수 있어요. ${publicSplitNotice}`
         const added = await c.rest('PUT', $channels$_$threadmembers$_, [thread.id, id])
         if (!added.ok) {
           console.error(action, { status: added.status })
           return await privateReply(c, failure)
         }
       }
-      failure = `${privateFailure} 빈 스레드가 남을 수 있어요.`
       action = 'private split save'
-      await createSplit(database(c), stored)
-      saved = true
+      failure = `분배를 저장하지 못했어요. 빈 스레드가 남을 수 있어요. ${publicSplitNotice}`
+      await createSplit(db, stored)
       action = 'private card post'
+      failure = `게시 결과를 확인하지 못했어요. <#${thread.id}>를 확인하고 카드가 없으면 /미완료로 스레드에 다시 올려 주세요.`
       const card = await c.rest('POST', $channels$_$messages, [thread.id], renderSplit(stored))
       if (!card.ok) {
         status = card.status
         throw new Error('Card post failed')
       }
-      cardPosted = true
       await privateReply(c, `<#${thread.id}>에 비공개 분배를 만들었어요.`)
     } catch {
       console.error(action, { status })
-      if (saved && !cardPosted) {
+      // A save exception may have committed; only definite card rejection permits cleanup.
+      if (action === 'private split save' || (action === 'private card post' && status !== null && status >= 400 && status < 500)) {
+        if (action === 'private card post') failure = `카드를 올리지 못해 분배를 만들지 않았어요. 빈 스레드가 남을 수 있어요. ${publicSplitNotice}`
         try {
-          await deleteSplit(database(c), stored.split.id, stored.split.guild_id)
+          await deleteSplit(db, stored.split.id, stored.split.guild_id)
         } catch {
           console.error('private split delete', { status: null })
-          failure += ' 기록이 남아 있어 /미완료로 스레드에 카드를 다시 올릴 수 있어요.'
+          failure = action === 'private split save'
+            ? '저장 결과를 확인하지 못했어요. /미완료에 보이면 스레드에 카드를 다시 올려 주세요.'
+            : '카드를 올리지 못했지만 기록이 남아 있어요. /미완료로 스레드에 카드를 다시 올릴 수 있어요.'
         }
       }
       await privateReply(c, failure)
