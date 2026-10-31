@@ -112,9 +112,9 @@ async function percentModal(id: string, values: Record<string, unknown> = {}, us
   payload.data.custom_id = `percent;${id}`
   return payload
 }
-function percentValues(options: Options, members: { user_id: string }[]) {
+function percentAnswers(options: Options, members: { user_id: string }[]) {
   return Object.fromEntries([
-    ['distributor', options.분배자퍼센트],
+    ...(members.length < 5 ? [['distributor', options.분배자퍼센트]] : []),
     ...members.map((m, i) => [m.user_id, options[`파티원${i + 1}퍼센트`]]),
   ])
 }
@@ -125,7 +125,7 @@ async function create(options?: Options) {
   const id = response.data.components[0].components[0].custom_id.split(';')[1] as string
   if (options && Object.keys(options).some((key) => key.includes('퍼센트'))) {
     const stored = (await getSplit(db, id, 'guild'))!
-    await redraw(await percentModal(id, percentValues(options, stored.members)))
+    await redraw(await percentModal(id, percentAnswers(options, stored.members)))
   }
   return id
 }
@@ -208,7 +208,7 @@ describe('creation and validation against local D1', () => {
     }
     const result = await json(payload)
     const id = result.data.components[0].components[0].custom_id.split(';')[1]
-    await redraw(await percentModal(id, percentValues(percentages, (await getSplit(db, id, 'guild'))!.members)))
+    await redraw(await percentModal(id, percentAnswers(percentages, (await getSplit(db, id, 'guild'))!.members)))
     const stored = (await getSplit(db, id, 'guild'))!
     expect(stored.split.net_sale).toBe(net)
     expect(stored.split.distributor_final).toBe(final)
@@ -861,7 +861,7 @@ describe('card percentage display', () => {
     const payload = command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first, ...options })
     payload.data.resolved.users['400'] = { id: '400', username: '셋째' }
     const stored = buildSplit(payload as unknown as APIModalSubmitInteraction)
-    return adjustPercent(stored, percentValues(options, stored.members))
+    return adjustPercent(stored, percentAnswers(options, stored.members))
   }
   it.each([
     {},
@@ -958,7 +958,7 @@ describe('item registration and embed cards', () => {
   it.each(['stale', 'legacy', 'forged', 'extra', 'negative', 'decimal'])(
     'rejects %s item references without writes or notifications', async (kind) => {
       const id = await create()
-      const payload = await modal(id)
+      const payload = submitModal(await json(component('uploaded', id, first)), { item_name: '장갑' }, first)
       if (kind === 'stale') {
         await redraw(await percentModal(id, { distributor: '60', [first]: '40' }))
       } else {
@@ -981,7 +981,7 @@ describe('item registration and embed cards', () => {
     })
   it.each([false, true])('rejects a listing change during upload storage (excluded=%s)', async (excluded) => {
     const id = await create({ ...defaults, 파티원2: second })
-    const payload = await modal(id)
+    const payload = submitModal(await json(component('uploaded', id, first)), { item_name: '장갑' }, first)
     const amount = (await getSplit(db, id, 'guild'))!.members[0].listing_amount
     const save = databaseModule.markUploaded
     vi.spyOn(databaseModule, 'markUploaded').mockImplementationOnce(async (...args) => {
