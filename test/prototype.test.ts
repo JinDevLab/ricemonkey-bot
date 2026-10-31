@@ -468,11 +468,11 @@ describe('private thread splits', () => {
       const response = await json({ ...payload, app_permissions: '0' }, true)
       expect(response.data.flags).toBe(64)
       expectPrivateFailure([], response)
-      for (const name of ['채널 보기', '비공개 스레드 만들기', '스레드에서 메시지 보내기', '링크 첨부', '메시지 기록 보기', '반응 추가']) expect(response.data.content).toContain(name)
+      for (const name of ['채널 보기', '비공개 스레드 만들기', '스레드와 포럼에서 메시지 보내기', '링크 첨부', '메시지 기록 보기', '반응 추가']) expect(response.data.content).toContain(name)
     }
     expect(fetch).not.toHaveBeenCalled()
   })
-  it.each([[10, '채널 보기'], [36, '비공개 스레드 만들기'], [38, '스레드에서 메시지 보내기'],
+  it.each([[10, '채널 보기'], [36, '비공개 스레드 만들기'], [38, '스레드와 포럼에서 메시지 보내기'],
     [14, '링크 첨부'], [16, '메시지 기록 보기'], [6, '반응 추가']] as const)('identifies a missing permission bit %s', async (bit, name) => {
     const calls = mockRest()
     const response = await json({ ...panel(), app_permissions: String(BigInt(permissions) & ~(1n << BigInt(bit))) })

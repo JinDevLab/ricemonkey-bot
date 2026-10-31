@@ -108,7 +108,7 @@ const privateFailure = `비공개 분배 스레드를 만들지 못했어요. �
 const threadPermissions = [
   [PermissionFlagsBits.ViewChannel, '채널 보기'],
   [PermissionFlagsBits.CreatePrivateThreads, '비공개 스레드 만들기'],
-  [PermissionFlagsBits.SendMessagesInThreads, '스레드에서 메시지 보내기'],
+  [PermissionFlagsBits.SendMessagesInThreads, '스레드와 포럼에서 메시지 보내기'],
   [PermissionFlagsBits.EmbedLinks, '링크 첨부'],
   [PermissionFlagsBits.ReadMessageHistory, '메시지 기록 보기'],
   [PermissionFlagsBits.AddReactions, '반응 추가'],
