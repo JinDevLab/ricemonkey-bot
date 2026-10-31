@@ -7,8 +7,8 @@ import { getPlatformProxy } from 'wrangler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import app from '../src/index'
 import { cancelSplit, createSplit, getSplit, markPurchased, markUploaded, unfinished } from '../src/db'
-import { buildSplit } from '../src/input'
-import type { APIChatInputApplicationCommandInteraction } from 'discord-api-types/v10'
+import { adjustPercent, buildSplit as buildModalSplit } from '../src/input'
+import type { APIModalSubmitInteraction } from 'discord-api-types/v10'
 import { parsePercent, splitErrorMessages } from '../src/input'
 import { commands, registrationCommands } from '../src/commands'
 import { escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from '../src/render'
@@ -29,7 +29,7 @@ beforeAll(async () => {
     const sql = await readFile(new URL(`../migrations/${migration}`, import.meta.url), 'utf8')
     for (const statement of sql.split(';').filter((s) => s.trim())) await db.prepare(statement).run()
     if (migration === '0001_init.sql') {
-      const legacy = buildSplit(command() as unknown as APIChatInputApplicationCommandInteraction)
+      const legacy = buildSplit(command() as unknown as APIModalSubmitInteraction)
       legacy.split.id = 'legacy'
       legacy.members[0].split_id = 'legacy'
       legacy.members[0].status = 'uploaded'
@@ -55,10 +55,14 @@ function command(name = '분배', options: Options = { 총판매금액: 10000000
     [distributor]: { id: distributor, username: '분배자' },
   }
   return {
-    id: 'interaction', application_id: 'app', token: 'fake-token', version: 1, type: 2,
+    id: 'interaction', application_id: 'app', token: 'fake-token', version: 1, type: name === '분배' ? 5 : 2,
     guild_id: guild, channel_id: 'channel', member: { user: { id: user } },
-    data: { name, type: 1, id: 'command',
-      options: Object.entries(options).map(([name, value]) => ({ name, value, type: name.includes('퍼센트') ? 3 : name.startsWith('파티원') ? 6 : 4 })),
+    data: { name, type: 1, id: 'command', custom_id: 'split',
+      components: [
+        { type: 18, component: { type: 4, custom_id: 'total', value: String(options.총판매금액) } },
+        { type: 18, component: { type: 21, custom_id: 'fee', value: options.수수료 === undefined ? null : String(options.수수료) } },
+        { type: 18, component: { type: 5, custom_id: 'members', values: Object.entries(options).filter(([key]) => /^파티원\d$/.test(key)).map(([, id]) => id) } },
+      ],
       resolved: { users, members: { [first]: { nick: '첫 닉네임' } } },
     },
   }
@@ -83,11 +87,33 @@ async function request(payload: unknown, token = false, binding: D1Database | nu
   })
 }
 async function json(payload: unknown, token = false) { return (await request(payload, token)).json() as Promise<any> }
+function buildSplit(payload: APIModalSubmitInteraction) {
+  const values = Object.fromEntries((payload.data.components as any[]).map((row) => [row.component.custom_id,
+    'value' in row.component ? row.component.value : row.component.values]))
+  return buildModalSplit(payload, { total: values.total, fee: values.fee, members: values.members })
+}
+function percentModal(id: string, values: Record<string, unknown> = {}, user = distributor) {
+  return { ...command('unused', {}, user), type: 5, message: { id: 'message' },
+    data: { custom_id: `percent;${id}`, components: Object.entries(values).map(([custom_id, value]) => ({
+      type: 18, component: { type: 4, custom_id, value },
+    })) } }
+}
+function percentValues(options: Options, members: { user_id: string }[]) {
+  return Object.fromEntries([
+    ['distributor', options.분배자퍼센트],
+    ...members.map((m, i) => [m.user_id, options[`파티원${i + 1}퍼센트`]]),
+  ])
+}
 async function create(options?: Options) {
   const response = await json(command('분배', options))
   expect(response.type).toBe(4)
   expect(response.data.flags).toBeUndefined()
-  return response.data.components[0].components[0].custom_id.split(';')[1] as string
+  const id = response.data.components[0].components[0].custom_id.split(';')[1] as string
+  if (options && Object.keys(options).some((key) => key.includes('퍼센트'))) {
+    const stored = (await getSplit(db, id, 'guild'))!
+    await redraw(percentModal(id, percentValues(options, stored.members)))
+  }
+  return id
 }
 async function ephemeral(payload: unknown, message?: string) {
   const response = await json(payload)
@@ -140,7 +166,7 @@ describe('command definitions and percent parser', () => {
       expect(command.integration_types).toEqual([0])
       for (const option of command.options ?? []) expect(regex.test(option.name)).toBe(true)
     }
-    expect(commands[0].options?.filter((o) => o.required).map((o) => o.name)).toEqual(['총판매금액', '수수료', '파티원1'])
+    expect(commands[0]).not.toHaveProperty('options')
     expect(Object.keys(splitErrorMessages)).toHaveLength(7)
   })
   it.each([['0', 0], ['0.01', 1], ['1.1', 110], ['99.99', 9999], ['100.00', 10000], ['000.1', 10], [undefined, undefined]])('parses %s exactly', (value, expected) => {
@@ -163,11 +189,12 @@ describe('creation and validation against local D1', () => {
     const payload = command('분배', { 총판매금액: 100000000, 수수료: fee, ...percentages })
     for (let i = 1; i <= count; i++) {
       const id = String(1000 + i)
-      payload.data.options.push({ name: `파티원${i}`, value: id, type: 6 })
+      payload.data.components[2].component.values!.push(id)
       payload.data.resolved.users[id] = { id, username: `파티원${i}` }
     }
     const result = await json(payload)
     const id = result.data.components[0].components[0].custom_id.split(';')[1]
+    await redraw(percentModal(id, percentValues(percentages, (await getSplit(db, id, 'guild'))!.members)))
     const stored = (await getSplit(db, id, 'guild'))!
     expect(stored.split.net_sale).toBe(net)
     expect(stored.split.distributor_final).toBe(final)
@@ -209,10 +236,8 @@ describe('creation and validation against local D1', () => {
   })
   it.each([
     { 총판매금액: 0 }, { 총판매금액: -1 }, { 총판매금액: 1.5 }, { 총판매금액: Number.MAX_SAFE_INTEGER + 1 },
-    { 총판매금액: '1,000' }, { 수수료: 4 }, { 파티원2: first }, { 파티원1: distributor },
-    { 파티원2퍼센트: '10' }, { 분배자퍼센트: '100.001' },
-    { 분배자퍼센트: '50', 파티원1퍼센트: '40' }, { 분배자퍼센트: '100' },
-    { 분배자퍼센트: '100', 파티원1퍼센트: '0' }, { 총판매금액: 1 },
+    { 총판매금액: '2,4,0' }, { 총판매금액: '문자' }, { 수수료: 4 }, { 수수료: undefined },
+    { 파티원2: first }, { 파티원1: distributor }, { 총판매금액: 1 },
   ])('rejects invalid input %j without writing', async (changes) => {
     await ephemeral(command('분배', { ...defaults, ...changes }))
     expect((await db.prepare('SELECT COUNT(*) AS n FROM splits').first<{ n: number }>())?.n).toBe(0)
@@ -242,11 +267,187 @@ describe('creation and validation against local D1', () => {
     expect(Number.isSafeInteger(stored.members[0].listing_amount)).toBe(true)
   })
   it('rolls back a failed batch creation atomically', async () => {
-    const stored = buildSplit(command('분배', { ...defaults, 파티원2: second }) as unknown as APIChatInputApplicationCommandInteraction)
+    const stored = buildSplit(command('분배', { ...defaults, 파티원2: second }) as unknown as APIModalSubmitInteraction)
     stored.members[1].listing_amount = -1
     await expect(createSplit(db, stored)).rejects.toThrow()
     expect(await getSplit(db, stored.split.id, 'guild')).toBeNull()
     expect((await db.prepare('SELECT COUNT(*) AS n FROM split_members').first<{ n: number }>())?.n).toBe(0)
+  })
+})
+
+describe('split and percentage modals', () => {
+  it('opens the slash command as a Label modal with radio and user selections', async () => {
+    const payload = { ...command('unused'), data: { name: '분배', type: 1, id: 'command' } }
+    const response = await json(payload)
+    expect(response).toEqual({ type: 9, data: { custom_id: 'split', title: '분배', components: [
+      { type: 18, label: '총판매금액', description: '수수료를 빼기 전 금액', component: {
+        type: 4, style: 1, custom_id: 'total', required: true, max_length: 21, placeholder: '240000000',
+      } },
+      { type: 18, label: '수수료', component: { type: 21, custom_id: 'fee', required: true,
+        options: [{ label: '3%', value: '3' }, { label: '5%', value: '5' }] } },
+      { type: 18, label: '파티원', description: '1~5명, 본인 제외', component: {
+        type: 5, custom_id: 'members', min_values: 1, max_values: 5,
+      } },
+    ] } })
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM splits').first('n')).toBe(0)
+  })
+  it('accepts comma-grouped amounts, preserves selected order and starts equally', async () => {
+    const id = await create({ 총판매금액: ' 240,000,000 ', 수수료: 3, 파티원1: second, 파티원2: first })
+    const stored = (await getSplit(db, id, 'guild'))!
+    expect(stored.split).toMatchObject({ total_sale: 240000000, distributor_percent_hundredths: null })
+    expect(stored.members.map((m) => [m.user_id, m.percent_hundredths])).toEqual([[second, null], [first, null]])
+  })
+  it.each([null, '4', '', 3, ['3']])('rejects fee payload %j', async (fee) => {
+    const payload = command()
+    ;(payload.data.components[1].component as any).value = fee
+    await ephemeral(payload, splitErrorMessages.INVALID_FEE)
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM splits').first('n')).toBe(0)
+  })
+  it.each([[], null, '200', [200], Array(6).fill(first)])('rejects malformed or empty member values %j', async (members) => {
+    const payload = command()
+    ;(payload.data.components[2].component as any).values = members
+    await ephemeral(payload)
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM splits').first('n')).toBe(0)
+  })
+  it('rejects entirely missing resolved data', async () => {
+    const payload = command()
+    delete (payload.data as { resolved?: unknown }).resolved
+    await ephemeral(payload, '파티원 정보를 확인할 수 없어요. 다시 선택해 주세요.')
+  })
+  it('shows the percentage button only before registration and rechecks permissions', async () => {
+    const id = await create()
+    const hasButton = async () => JSON.stringify(renderSplit((await getSplit(db, id, 'guild'))!)).includes(`percent;${id}`)
+    expect(await hasButton()).toBe(true)
+    await ephemeral(component('percent', id, first), '분배자만 이 버튼을 누를 수 있어요.')
+    await ephemeral(component('percent', `${id};extra`))
+    await ephemeral(component('percent', id, distributor, undefined, 'other'))
+    await json(modal(id))
+    expect(await hasButton()).toBe(false)
+    await ephemeral(component('percent', id), '이미 경매장 등록을 한 파티원이 있어서 비율을 바꿀 수 없어요.')
+    await json(component('purchased', id, distributor, first))
+    expect(await hasButton()).toBe(false)
+    await redraw(component('percent', id))
+    const canceled = await create()
+    await cancelSplit(db, canceled, 'guild', distributor)
+    expect(JSON.stringify(renderSplit((await getSplit(db, canceled, 'guild'))!))).not.toContain(`percent;${canceled}`)
+    await redraw(component('percent', canceled))
+  })
+  it.each([4, 5])('opens five fields for %s members with correct distributor handling', async (count) => {
+    const payload = command()
+    payload.data.components[2].component.values = []
+    for (let i = 0; i < count; i++) {
+      const id = String(1000 + i)
+      payload.data.components[2].component.values.push(id)
+      payload.data.resolved.users[id] = { id, username: '가'.repeat(50) }
+    }
+    const created = await json(payload)
+    const id = created.data.components[0].components[0].custom_id.split(';')[1]
+    const values = { distributor: '12.5', '1000': '12.5', '1001': '0' }
+    await redraw(percentModal(id, values))
+    const open = await json(component('percent', id))
+    expect(open.type).toBe(9)
+    expect(open.data.title).toBe(count === 5 ? '비율 조정 (분배자는 남은 몫)' : '비율 조정')
+    expect(open.data.components).toHaveLength(5)
+    const fields = open.data.components
+    expect(fields.some((f: any) => f.component.custom_id === 'distributor')).toBe(count === 4)
+    for (const field of fields) {
+      expect(field.type).toBe(18)
+      expect(Array.from(field.label).length).toBeLessThanOrEqual(45)
+      expect(field).toMatchObject({ description: '비우면 남은 퍼센트를 나눠요', component: { type: 4, style: 1, required: false, max_length: 7 } })
+    }
+    expect(fields.find((f: any) => f.component.custom_id === '1000').component.value).toBe('12.5')
+    expect(fields.find((f: any) => f.component.custom_id === '1001').component.value).toBe('0')
+    if (count === 5) expect((await getSplit(db, id, 'guild'))!.split.distributor_percent_hundredths).toBeNull()
+  })
+  it('recalculates, excludes zero shares and restores excluded members with whitespace blanks', async () => {
+    const id = await create({ ...defaults, 파티원2: second })
+    const before = (await getSplit(db, id, 'guild'))!
+    const response = await redraw(percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }))
+    expect(response.allowed_mentions?.users).toEqual([first])
+    const adjusted = (await getSplit(db, id, 'guild'))!
+    expect(adjusted.split).toMatchObject({ total_sale: before.split.total_sale, net_sale: before.split.net_sale,
+      sale_fee_percent: before.split.sale_fee_percent, distributor_percent_hundredths: 6000 })
+    expect(adjusted.members[1]).toMatchObject({ percent_hundredths: 0, listing_amount: 0, status: 'excluded' })
+    await redraw(percentModal(id, { distributor: '  ', [first]: '', [second]: '\t' }))
+    const restored = (await getSplit(db, id, 'guild'))!
+    expect(restored.members.every((m) => m.status === 'pending' && m.percent_hundredths === null)).toBe(true)
+    expect(restored.split.distributor_final).toBe(before.split.distributor_final)
+    expect(restored.members.map((m) => m.listing_amount)).toEqual(before.members.map((m) => m.listing_amount))
+  })
+  it.each([
+    { distributor: '60', [first]: '50' }, { distributor: '50', [first]: '40' },
+    { distributor: '100' }, { distributor: '100.001' }, { distributor: '100', [first]: '0' },
+  ])('rejects percentage errors without touching the card or DB %j', async (values) => {
+    const id = await create()
+    const before = await getSplit(db, id, 'guild')
+    await ephemeral(percentModal(id, values))
+    expect(await getSplit(db, id, 'guild')).toEqual(before)
+  })
+  it('rechecks message origin and authorization on percentage submission', async () => {
+    const id = await create()
+    await ephemeral(percentModal(id, {}, first), '분배자만 이 버튼을 누를 수 있어요.')
+    const payload = percentModal(id)
+    delete (payload as { message?: unknown }).message
+    await ephemeral(payload, '안내 메시지의 비율 조정 버튼을 다시 눌러 주세요.')
+    await ephemeral(percentModal(`${id};extra`))
+    await cancelSplit(db, id, 'guild', distributor)
+    await redraw(percentModal(id))
+  })
+  it.each(['uploaded', 'purchased', 'canceled', 'distributor', 'guild'] as const)('protects every DB row against stale %s saves', async (state) => {
+    const id = await create({ ...defaults, 파티원2: second })
+    await json(component('percent', id))
+    const adjusted = adjustPercent((await getSplit(db, id, 'guild'))!, { distributor: '60', [first]: '40', [second]: '0' })
+    if (state === 'uploaded' || state === 'purchased') {
+      await markUploaded(db, id, 'guild', first, '옛 금액 아이템')
+      if (state === 'purchased') await markPurchased(db, id, 'guild', distributor, first)
+    } else if (state === 'canceled') await cancelSplit(db, id, 'guild', distributor)
+    const before = await getSplit(db, id, 'guild')
+    expect(await databaseModule.savePercent(db, adjusted, state === 'guild' ? 'other' : 'guild', state === 'distributor' ? first : distributor)).toBe(false)
+    expect(await getSplit(db, id, 'guild')).toEqual(before)
+    if (state === 'uploaded' || state === 'purchased') await ephemeral(percentModal(id, { distributor: '60' }))
+    expect(await getSplit(db, id, 'guild')).toEqual(before)
+  })
+  it('rejects a registration between handler read and batch save without partial writes', async () => {
+    const id = await create()
+    const save = databaseModule.savePercent
+    vi.spyOn(databaseModule, 'savePercent').mockImplementationOnce(async (...args) => {
+      await markUploaded(db, id, 'guild', first, '경쟁 등록')
+      return save(...args)
+    })
+    const before = (await getSplit(db, id, 'guild'))!
+    await ephemeral(percentModal(id, { distributor: '60' }), '이미 경매장 등록을 한 파티원이 있어서 비율을 바꿀 수 없어요.')
+    const latest = (await getSplit(db, id, 'guild'))!
+    expect(latest.split).toEqual(before.split)
+    expect(latest.members[0]).toMatchObject({ percent_hundredths: null, listing_amount: before.members[0].listing_amount, status: 'uploaded' })
+  })
+  it('notifies all and only members whose listing amount changed, after updating the card', async () => {
+    const id = await create({ ...defaults, 파티원2: second })
+    await redraw(percentModal(id, { distributor: '50', [first]: '50', [second]: '0' }))
+    const calls: any[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push(JSON.parse(init.body as string)); return new Response('{}')
+    }))
+    expect((await request(percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }), true)).status).toBe(202)
+    await Promise.all(background)
+    expect(calls).toHaveLength(2)
+    expect(calls[0].type).toBe(7)
+    expect(calls[1]).toEqual({ content: `<@${first}> <@${distributor}>님이 비율을 바꿨어요. 경매장 등록가를 다시 확인해 주세요.`,
+      allowed_mentions: { parse: [], users: [first] } })
+    await redraw(percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }))
+    expect(calls).toHaveLength(2)
+    expect((await request(percentModal(id), true)).status).toBe(202)
+    await Promise.all(background)
+    expect(calls[3].allowed_mentions.users).toEqual([first, second])
+    expect(calls[3].content).toBe(`<@${first}> <@${second}> <@${distributor}>님이 비율을 바꿨어요. 경매장 등록가를 다시 확인해 주세요.`)
+  })
+  it('does not send a callback or notification when percentages change but amounts do not', async () => {
+    const id = await create({ ...defaults, 총판매금액: 100 })
+    const calls = vi.fn()
+    vi.stubGlobal('fetch', calls)
+    const before = (await getSplit(db, id, 'guild'))!
+    expect((await json(percentModal(id, { distributor: '50', [first]: '50' }), true)).type).toBe(7)
+    expect(calls).not.toHaveBeenCalled()
+    expect((await getSplit(db, id, 'guild'))!.members[0].listing_amount).toBe(before.members[0].listing_amount)
   })
 })
 
@@ -566,7 +767,8 @@ describe('card percentage display', () => {
   function card(options: Options) {
     const payload = command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first, ...options })
     payload.data.resolved.users['400'] = { id: '400', username: '셋째' }
-    return buildSplit(payload as unknown as APIChatInputApplicationCommandInteraction)
+    const stored = buildSplit(payload as unknown as APIModalSubmitInteraction)
+    return adjustPercent(stored, percentValues(options, stored.members))
   }
   it.each([
     {},
@@ -617,7 +819,7 @@ describe('message amount formatting', () => {
     expect(listingMoney(value).match(/\((\d+)\)$/)?.[1]).toBe(String(value))
   })
   it.each(['pending', 'uploaded', 'purchased', 'canceled'] as const)('renders the entire %s description', (state) => {
-    const stored = buildSplit(command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first }) as unknown as APIChatInputApplicationCommandInteraction)
+    const stored = buildSplit(command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first }) as unknown as APIModalSubmitInteraction)
     if (state === 'canceled') stored.split.status = 'canceled'
     else stored.members[0].status = state
     if (state === 'uploaded' || state === 'purchased') stored.members[0].item_name = '*장갑*'
@@ -637,7 +839,7 @@ describe('message amount formatting', () => {
     expect(description.match(/경매장 등록가: \*\*[^\n]+\*\* \((\d+)\)/)?.[1]).toBe(String(stored.members[0].listing_amount))
   })
   it('renders both unfinished queues and history with exact line order', () => {
-    const stored = buildSplit(command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first }) as unknown as APIChatInputApplicationCommandInteraction)
+    const stored = buildSplit(command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first }) as unknown as APIModalSubmitInteraction)
     const created_at = '2026-10-01T00:00:00Z'
     const timestamp = `<t:${Date.parse(created_at) / 1000}:d>`
     const pending = { ...stored.members[0], ...stored.split, user_id: first, status: 'uploaded' as const, item_name: '장갑', created_at }
@@ -742,7 +944,7 @@ describe('item registration and embed cards', () => {
     }
   })
   it('fits Discord embed limits with five members and ten worst-case escaped item names', () => {
-    const stored = buildSplit(command() as unknown as APIChatInputApplicationCommandInteraction)
+    const stored = buildSplit(command() as unknown as APIModalSubmitInteraction)
     stored.members = Array.from({ length: 5 }, (_, i) => ({ ...stored.members[0], user_id: '9'.repeat(19) + i, item_name: '*'.repeat(100), status: 'uploaded' }))
     stored.split.total_sale = Number.MAX_SAFE_INTEGER
     stored.split.net_sale = Number.MAX_SAFE_INTEGER

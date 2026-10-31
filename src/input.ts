@@ -1,6 +1,6 @@
-import type { APIChatInputApplicationCommandInteraction } from 'discord-api-types/v10'
+import type { APIModalSubmitInteraction } from 'discord-api-types/v10'
 import { calculateSplit, SplitError } from './split'
-import type { SplitErrorCode } from './split'
+import type { SplitErrorCode, SplitInput } from './split'
 import type { StoredSplit } from './db'
 
 export class InputError extends Error {}
@@ -26,57 +26,73 @@ export function parsePercent(value: unknown): number | undefined {
   return result
 }
 
-export function buildSplit(interaction: APIChatInputApplicationCommandInteraction): StoredSplit {
+function checkedSplit(input: SplitInput) {
+  try {
+    const result = calculateSplit(input)
+    if (result.members.every((m) => m.listingAmount === 0n)) {
+      throw new InputError('분배받을 파티원이 한 명 이상 있어야 해요. 모든 파티원을 0%로 지정할 수 없어요.')
+    }
+    return result
+  } catch (error) {
+    if (error instanceof SplitError) throw new InputError(splitErrorMessages[error.code])
+    throw error
+  }
+}
+
+export function adjustPercent(stored: StoredSplit, values: Record<string, unknown>): StoredSplit {
+  const percent = (key: string) => {
+    const raw = values[key]
+    return parsePercent(typeof raw === 'string' && !raw.trim() ? undefined : raw)
+  }
+  const distributorPercent = stored.members.length === 5 ? undefined : percent('distributor')
+  const members = stored.members.map((m) => ({ id: m.user_id, percentHundredths: percent(m.user_id) }))
+  const result = checkedSplit({ totalSale: BigInt(stored.split.total_sale), saleFeePercent: stored.split.sale_fee_percent,
+    distributor: { id: stored.split.distributor_id, percentHundredths: distributorPercent }, members })
+  return {
+    split: { ...stored.split, distributor_percent_hundredths: distributorPercent ?? null, distributor_final: Number(result.distributorFinal) },
+    members: stored.members.map((m, i) => ({ ...m, percent_hundredths: members[i].percentHundredths ?? null,
+      listing_amount: Number(result.members[i].listingAmount), expected_receipt: Number(result.members[i].expectedReceipt),
+      status: result.members[i].listingAmount === 0n ? 'excluded' : 'pending' })),
+  }
+}
+
+export function buildSplit(interaction: APIModalSubmitInteraction, values: { total: unknown; fee: unknown; members: unknown }): StoredSplit {
   const guild = interaction.guild_id
   const distributor = interaction.member?.user.id
   if (!guild || !distributor || !interaction.channel_id) throw new InputError('서버 안에서 사용해 주세요.')
-  const values = new Map(interaction.data.options?.map((o) => [o.name, 'value' in o ? o.value : undefined]))
-  const total = values.get('총판매금액')
-  if (typeof total !== 'number' || !Number.isSafeInteger(total) || total <= 0) {
-    throw new InputError('총 판매금액은 1 이상인 안전한 정수로 입력해 주세요. 쉼표는 넣을 수 없어요.')
+  const raw = typeof values.total === 'string' ? values.total.trim() : ''
+  const total = Number(raw.replaceAll(',', ''))
+  if (!/^(\d+|\d{1,3}(,\d{3})+)$/.test(raw) || !Number.isSafeInteger(total) || total <= 0) {
+    throw new InputError('총 판매금액은 숫자와 세 자리마다의 쉼표만 써서 1 이상인 안전한 정수로 입력해 주세요.')
   }
-  const fee = values.get('수수료')
-  if (fee !== 3 && fee !== 5) throw new InputError(splitErrorMessages.INVALID_FEE)
-  const distributorPercent = parsePercent(values.get('분배자퍼센트'))
-  const members: { id: string; percentHundredths: number | undefined; displayName: string }[] = []
+  if (values.fee !== '3' && values.fee !== '5') throw new InputError(splitErrorMessages.INVALID_FEE)
+  const fee = Number(values.fee) as 3 | 5
+  if (!Array.isArray(values.members) || !values.members.every((id): id is string => typeof id === 'string')) {
+    throw new InputError('파티원을 다시 선택해 주세요.')
+  }
+  const members: { id: string; displayName: string }[] = []
   const seen = new Set([distributor])
-  for (let i = 1; i <= 5; i++) {
-    const id = values.get(`파티원${i}`)
-    const percent = parsePercent(values.get(`파티원${i}퍼센트`))
-    if (id === undefined) {
-      if (percent !== undefined) throw new InputError(`파티원${i}을 선택한 뒤 퍼센트를 입력해 주세요.`)
-      continue
-    }
-    if (typeof id !== 'string') throw new InputError('파티원을 다시 선택해 주세요.')
+  for (const id of values.members) {
     if (seen.has(id)) throw new InputError(splitErrorMessages.DUPLICATE_PARTICIPANT)
     seen.add(id)
     const user = interaction.data.resolved?.users?.[id]
     if (!user) throw new InputError('파티원 정보를 확인할 수 없어요. 다시 선택해 주세요.')
     if (user.bot) throw new InputError('봇 계정은 파티원으로 선택할 수 없어요.')
     const displayName = interaction.data.resolved?.members?.[id]?.nick ?? user.global_name ?? user.username
-    members.push({ id, percentHundredths: percent, displayName })
+    members.push({ id, displayName })
   }
-  let result
-  try {
-    result = calculateSplit({ totalSale: BigInt(total), saleFeePercent: fee, distributor: { id: distributor, percentHundredths: distributorPercent }, members })
-  } catch (error) {
-    if (error instanceof SplitError) throw new InputError(splitErrorMessages[error.code])
-    throw error
-  }
-  if (result.members.every((m) => m.listingAmount === 0n)) {
-    throw new InputError('분배받을 파티원이 한 명 이상 있어야 해요. 모든 파티원을 0%로 지정할 수 없어요.')
-  }
+  const result = checkedSplit({ totalSale: BigInt(total), saleFeePercent: fee, distributor: { id: distributor }, members })
   const id = crypto.randomUUID()
   return {
     split: {
       id, guild_id: guild, channel_id: interaction.channel_id, distributor_id: distributor,
       total_sale: total, sale_fee_percent: fee, net_sale: Number(result.netSale),
-      distributor_percent_hundredths: distributorPercent ?? null, distributor_final: Number(result.distributorFinal),
+      distributor_percent_hundredths: null, distributor_final: Number(result.distributorFinal),
       status: 'active', created_at: new Date().toISOString(), completed_at: null, canceled_at: null,
     },
     members: result.members.map((share, position) => ({
       split_id: id, user_id: share.id, display_name: members[position].displayName, position,
-      percent_hundredths: members[position].percentHundredths ?? null,
+      percent_hundredths: null,
       listing_amount: Number(share.listingAmount), expected_receipt: Number(share.expectedReceipt),
       status: share.listingAmount === 0n ? 'excluded' : 'pending', item_name: null, uploaded_at: null, purchased_at: null,
     })),

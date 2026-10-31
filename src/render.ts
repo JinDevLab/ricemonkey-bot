@@ -51,7 +51,10 @@ export function renderSplit({ split: s, members }: StoredSplit): APIInteractionR
     components: s.status === 'active' ? [
       row([button(`uploaded;${s.id}`, '경매장 등록', 1)]),
       row(visible.map((m) => button(`purchased;${s.id};${m.user_id}`, `구매 완료 · ${m.display_name}`, 3, m.status !== 'uploaded'))),
-      row([button(`cancel;${s.id}`, '분배 취소', 4)]),
+      row([
+        ...(!members.some((m) => m.status === 'uploaded' || m.status === 'purchased') ? [button(`percent;${s.id}`, '비율 조정', 2)] : []),
+        button(`cancel;${s.id}`, '분배 취소', 4),
+      ]),
     ] : [],
   }
 }

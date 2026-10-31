@@ -63,6 +63,23 @@ export async function getSplit(db: D1Database, id: string, guild: string): Promi
   return split ? { split, members: members.results as unknown as MemberRow[] } : null
 }
 
+export async function savePercent(db: D1Database, { split, members }: StoredSplit, guild: string, distributor: string) {
+  const guard = `EXISTS (SELECT 1 FROM splits s WHERE s.id = ? AND s.guild_id = ?
+    AND s.distributor_id = ? AND s.status = 'active')
+    AND NOT EXISTS (SELECT 1 FROM split_members WHERE split_id = ? AND status IN ('uploaded', 'purchased'))`
+  const [result] = await db.batch([
+    db.prepare(`UPDATE splits SET distributor_percent_hundredths = ?, distributor_final = ?
+      WHERE id = ? AND ${guard}`).bind(split.distributor_percent_hundredths, split.distributor_final,
+      split.id, split.id, guild, distributor, split.id),
+    ...members.map((m) => db.prepare(`UPDATE split_members
+      SET percent_hundredths = ?, listing_amount = ?, expected_receipt = ?, status = ?
+      WHERE split_id = ? AND user_id = ? AND status IN ('pending', 'excluded') AND ${guard}`)
+      .bind(m.percent_hundredths, m.listing_amount, m.expected_receipt, m.status,
+        split.id, m.user_id, split.id, guild, distributor, split.id)),
+  ])
+  return result.meta.changes > 0
+}
+
 export async function markUploaded(db: D1Database, id: string, guild: string, user: string, itemName: string) {
   const result = await db.prepare(`UPDATE split_members SET status = 'uploaded', item_name = ?, uploaded_at = COALESCE(uploaded_at, ?)
     WHERE split_id = ? AND user_id = ? AND status IN ('pending', 'uploaded')
