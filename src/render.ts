@@ -20,6 +20,11 @@ const button = (custom_id: string, label: string, style: 1 | 2 | 3 | 4, disabled
 const row = (components: APIButtonComponentWithCustomId[]): APIActionRowComponent<APIButtonComponentWithCustomId> => ({ type: 1, components })
 const item = (m: Pick<MemberRow, 'item_name' | 'status'>) => m.item_name ? escapeItemName(m.item_name) : m.status === 'pending' ? '대기' : '아이템 미입력'
 
+export function cardShowsMember(description: string, member: Pick<MemberRow, 'user_id' | 'listing_amount'>) {
+  const block = description.split('\n\n').find((part) => part.startsWith(`<@${member.user_id}>`))
+  return member.listing_amount > 0 ? !!block?.includes(listingMoney(member.listing_amount)) : block === undefined
+}
+
 export function renderSplit({ split: s, members }: StoredSplit): APIInteractionResponseCallbackData {
   const visible = members.filter((m) => m.status !== 'excluded')
   const purchased = visible.filter((m) => m.status === 'purchased').length

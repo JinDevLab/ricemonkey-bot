@@ -145,6 +145,39 @@ async function redraw(payload: unknown) {
 }
 const defaults = { 총판매금액: 100000000, 수수료: 5, 파티원1: first }
 
+describe('percentage notification recovery', () => {
+  it('recovers included and excluded notifications after failed callback with identical resubmission', async () => {
+    const id = await create({ ...defaults, 파티원2: second })
+    const oldCard = renderSplit((await getSplit(db, id, 'guild'))!).embeds
+    const payload = await percentModal(id, { distributor: '60', [first]: '40', [second]: '0' })
+    Object.assign(payload.message, { embeds: oldCard })
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fetch = vi.fn(async (_url?: any, _init?: any) => new Response('{}', { status: 500 }))
+    vi.stubGlobal('fetch', fetch)
+    await request(payload, true)
+    await Promise.all(background)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(log).toHaveBeenCalled()
+    const calls: any[] = []
+    fetch.mockImplementation(async (_url?: any, init?: any) => { calls.push(JSON.parse(init.body)); return new Response('{}') })
+    const retry = await percentModal(id)
+    Object.assign(retry.message, { embeds: oldCard })
+    await request(retry, true)
+    await Promise.all(background)
+    expect(calls).toHaveLength(2)
+    expect(calls[1].allowed_mentions).toEqual({ parse: [], users: [first, second] })
+    expect(calls[1].content).toContain('경매장 등록가를 다시 확인해 주세요.')
+    expect(calls[1].content).toContain('이번 분배에서 제외됐어요. 이미 올렸다면 내려 주세요.')
+    const same = await percentModal(id)
+    Object.assign(same.message, { embeds: renderSplit((await getSplit(db, id, 'guild'))!).embeds })
+    expect((await json(same, true)).type).toBe(7)
+    expect(calls).toHaveLength(2)
+    // Missing descriptions fall back to the DB comparison, rather than notifying everyone.
+    expect((await json(await percentModal(id), true)).type).toBe(7)
+    expect(calls).toHaveLength(2)
+  })
+})
+
 describe('reposting cards', () => {
   function repost(id: string, user = distributor, guild = 'guild') {
     return { ...component('unused', '', user, undefined, guild), data: { component_type: 3, custom_id: 'repost', values: [id] } }

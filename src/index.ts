@@ -3,7 +3,7 @@ import type { CommandContext, ComponentContext, ModalContext } from 'discord-hon
 import type { APILabelComponent } from 'discord-api-types/v10'
 import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, purgeExpired, savePercent, unfinished } from './db'
 import { adjustPercent, buildSplit, InputError } from './input'
-import { escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from './render'
+import { cardShowsMember, escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from './render'
 
 export interface Bindings {
   DB?: D1Database
@@ -146,7 +146,9 @@ app.modal('percent', guarded<ModalContext<Env>>(async (c) => {
   }
   const latest = await getSplit(database(c), stored.split.id, guild)
   if (!latest) throw new Error('Split disappeared')
-  const changed = latest.members.filter((m, i) => m.listing_amount !== stored.members[i].listing_amount)
+  const description = c.interaction.message.embeds?.[0]?.description
+  const changed = latest.members.filter((m, i) => m.listing_amount !== stored.members[i].listing_amount
+    || (typeof description === 'string' && !cardShowsMember(description, m)))
   if (!changed.length) return c.update().res(renderSplit(latest))
   const included = changed.filter((m) => m.listing_amount > 0)
   const excluded = changed.filter((m) => m.listing_amount === 0)
