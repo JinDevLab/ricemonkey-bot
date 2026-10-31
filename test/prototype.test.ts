@@ -210,6 +210,22 @@ describe('reposting cards', () => {
     await db.prepare("UPDATE splits SET status = 'completed' WHERE id = ?").bind(id).run()
     await ephemeral(repost(id), '이미 끝난 분배예요.')
   })
+  it('rejects reposts outside the original channel without posting a card', async () => {
+    const id = await create()
+    await markUploaded(db, id, 'guild', first, '비공개 아이템')
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    for (const user of [distributor, first]) {
+      const response = await json({ ...repost(id, user), channel_id: 'other-channel' }, true)
+      expect(response).toEqual({ type: 4, data: {
+        flags: 64,
+        content: '이 카드는 <#channel> 채널에서만 다시 올릴 수 있어요. 그 채널에서 /미완료를 실행해 주세요.',
+        allowed_mentions: { parse: [], users: [] },
+      } })
+      expect(JSON.stringify(response)).not.toContain('비공개 아이템')
+    }
+    expect(fetch).not.toHaveBeenCalled()
+  })
   it('keeps old and new buttons usable and reacts in the clicked channel', async () => {
     const id = await create()
     await json(repost(id))

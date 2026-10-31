@@ -183,6 +183,9 @@ app.component('repost', guarded<ComponentContext<Env>>(async (c) => {
     return reject(c, '이 분배의 참여자만 카드를 다시 올릴 수 있어요.')
   }
   if (stored.split.status !== 'active') return reject(c, '이미 끝난 분배예요.')
+  if (c.interaction.channel_id !== stored.split.channel_id) {
+    return reject(c, `이 카드는 <#${stored.split.channel_id}> 채널에서만 다시 올릴 수 있어요. 그 채널에서 /미완료를 실행해 주세요.`)
+  }
   return c.update(false).res({ ...renderSplit(stored), allowed_mentions: { parse: [], users: [] } })
 }))
 
