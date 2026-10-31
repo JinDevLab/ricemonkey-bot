@@ -58,11 +58,11 @@ D1의 일일 한도는 00:00 UTC에 초기화된다.
 - 비율 변경은 하나의 D1 batch에서 부모·모든 멤버를 함께 저장한다. 모든 UPDATE에 서버·분배자·active·등록/구매자 없음 조건을 걸고 멤버는 pending/excluded만 허용한다. 경매장 등록이 먼저 저장되면 비율은 어느 행도 바뀌지 않는다. 새 마이그레이션은 없다.
 
 ## 6. CI/CD
-GitHub Actions CI를 `.github/workflows/ci.yml`에 구현했다. 로컬에서도 `npm run typecheck`, `npm test`, `npx wrangler deploy --dry-run`을 실행한다. CI의 실제 원격 실행은 아직 확인하지 않았다. 공개 저장소의 표준 러너는 무료다.
+GitHub Actions CI를 `.github/workflows/ci.yml`에 구현했다. 로컬에서도 `npm run typecheck`, `npm test`, `npx wrangler deploy --dry-run`을 실행한다. CI의 실제 원격 실행 확인 기록은 [작업과 확인 기록](todo.md)에 릴리스별로 남긴다. 공개 저장소의 표준 러너는 무료다.
 
 | 단계 | 실행 시점 | 내용 | 상태 |
 |---|---|---|---|
-| CI | PR, `main`과 `claude/**` 푸시 | Node 24, `npm ci`, 타입 검사, 테스트, `wrangler deploy --dry-run` | 구현, 실행 미확인 |
+| CI | PR, `main`과 `claude/**` 푸시 | Node 24, `npm ci`, 타입 검사, 테스트, `wrangler deploy --dry-run` | 구현, 실행 확인 기록은 todo 참조 |
 | CD | 추후 결정 | 현재는 수동 릴리스 | 보류 |
 
 - CI는 배포하지 않으며 비밀값도 쓰지 않는다. `permissions: contents: read`이고 액션은 조회한 커밋 SHA로 고정한다. `pull_request_target`은 쓰지 않는다.
