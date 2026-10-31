@@ -229,4 +229,4 @@ ricemonkey-bot/
 
 ## 📄 라이선스
 
-라이선스는 아직 정하지 않았어요. 현재 저장소에는 `LICENSE` 파일이 없어요.
+[MIT License](LICENSE) · Copyright (c) 2026 JinDevLab

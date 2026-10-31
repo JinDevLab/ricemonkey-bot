@@ -2,6 +2,7 @@
   "name": "ricemonkey-bot",
   "version": "0.4.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=24"
