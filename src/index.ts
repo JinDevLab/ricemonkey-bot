@@ -1,7 +1,7 @@
 import { DiscordHono, $webhooks$_$_, $channels$_$messages$_$reactions$_$me } from 'discord-hono'
 import type { CommandContext, ComponentContext, ModalContext } from 'discord-hono'
 import type { APILabelComponent } from 'discord-api-types/v10'
-import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, savePercent, unfinished } from './db'
+import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, purgeExpired, savePercent, unfinished } from './db'
 import { adjustPercent, buildSplit, InputError } from './input'
 import { escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from './render'
 
@@ -13,6 +13,15 @@ export interface Bindings {
 type Env = { Bindings: Bindings; Variables: Record<string, unknown> }
 type Context = CommandContext<Env> | ComponentContext<Env> | ModalContext<Env>
 const app = new DiscordHono<Env>()
+
+app.cron('0 18 * * *', async (c) => {
+  try {
+    if (!c.env.DB) throw new Error('DB unavailable')
+    console.info(await purgeExpired(c.env.DB, new Date()))
+  } catch (error) {
+    console.error(error instanceof Error ? error.name : 'UnknownError')
+  }
+})
 
 function reject(c: Context, content: string) {
   if (c.interaction.type === 3 || c.interaction.type === 5) (c as ComponentContext<Env> | ModalContext<Env>).update(false)

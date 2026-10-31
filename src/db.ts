@@ -52,6 +52,21 @@ export async function createSplit(db: D1Database, { split, members }: StoredSpli
   ])
 }
 
+export async function purgeExpired(db: D1Database, now: Date) {
+  const cutoff = new Date(now)
+  const day = cutoff.getUTCDate()
+  cutoff.setUTCDate(1)
+  cutoff.setUTCMonth(cutoff.getUTCMonth() - 3)
+  const lastDay = new Date(Date.UTC(cutoff.getUTCFullYear(), cutoff.getUTCMonth() + 1, 0)).getUTCDate()
+  cutoff.setUTCDate(Math.min(day, lastDay))
+  const before = cutoff.toISOString()
+  const [members, splits] = await db.batch([
+    db.prepare('DELETE FROM split_members WHERE split_id IN (SELECT id FROM splits WHERE created_at < ?)').bind(before),
+    db.prepare('DELETE FROM splits WHERE created_at < ?').bind(before),
+  ])
+  return { members: members.meta.changes, splits: splits.meta.changes }
+}
+
 export async function getSplit(db: D1Database, id: string, guild: string): Promise<StoredSplit | null> {
   // One batch provides a consistent snapshot of the parent and child rows.
   const [splits, members] = await db.batch([

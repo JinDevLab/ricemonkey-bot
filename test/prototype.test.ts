@@ -145,6 +145,52 @@ async function redraw(payload: unknown) {
 }
 const defaults = { 총판매금액: 100000000, 수수료: 5, 파티원1: first }
 
+describe('expired splits', () => {
+  it.each([
+    ['2026-05-31T12:34:56.789Z', '2026-02-28T12:34:56.789Z'],
+    ['2024-05-31T12:34:56.789Z', '2024-02-29T12:34:56.789Z'],
+    ['2026-10-31T00:00:00.000Z', '2026-07-31T00:00:00.000Z'],
+  ])('clamps three UTC calendar months from %s and preserves the exact boundary', async (now, cutoff) => {
+    const expired: string[] = []
+    for (const status of ['active', 'completed', 'canceled']) {
+      const id = await create()
+      expired.push(id)
+      await db.prepare('UPDATE splits SET status = ?, created_at = ? WHERE id = ?')
+        .bind(status, new Date(Date.parse(cutoff) - 1).toISOString(), id).run()
+    }
+    const boundary = await create()
+    await db.prepare('UPDATE splits SET created_at = ? WHERE id = ?').bind(cutoff, boundary).run()
+    const recent = await create()
+    const other = await create()
+    await db.prepare('UPDATE splits SET guild_id = ? WHERE id = ?').bind('other', other).run()
+    expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 3, splits: 3 })
+    for (const id of expired) {
+      expect(await getSplit(db, id, 'guild')).toBeNull()
+      await ephemeral(component('cancel', id), '분배를 찾을 수 없어요.')
+    }
+    for (const id of [boundary, recent]) expect(await getSplit(db, id, 'guild')).not.toBeNull()
+    expect(await getSplit(db, other, 'other')).not.toBeNull()
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM split_members').first('n')).toBe(3)
+    expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 0, splits: 0 })
+  })
+  it('runs the configured cron through the default scheduled export and contains DB errors', async () => {
+    const config = JSON.parse(await readFile(new URL('../wrangler.jsonc', import.meta.url), 'utf8'))
+    const cron = config.triggers.crons[0]
+    expect(cron).toBe('0 18 * * *')
+    const id = await create()
+    await db.prepare('UPDATE splits SET created_at = ? WHERE id = ?').bind('2000-01-01T00:00:00.000Z', id).run()
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {})
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const event = { cron, type: 'scheduled' as const, scheduledTime: Date.now(), noRetry() {} }
+    await app.scheduled(event, { DB: db, DISCORD_PUBLIC_KEY: publicKey })
+    expect(info).toHaveBeenCalledWith({ members: 1, splits: 1 })
+    expect(await getSplit(db, id, 'guild')).toBeNull()
+    const broken = { prepare() { throw new TypeError('SQL bindings secret user') } } as unknown as D1Database
+    await expect(app.scheduled(event, { DB: broken, DISCORD_PUBLIC_KEY: publicKey })).resolves.toBeUndefined()
+    expect(error.mock.calls).toEqual([['TypeError']])
+  })
+})
+
 describe('command definitions and percent parser', () => {
   it('omits global-only fields for guild registration without mutating definitions', () => {
     const guild = registrationCommands('guild')
