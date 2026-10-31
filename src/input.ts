@@ -63,10 +63,10 @@ export function buildSplit(interaction: APIModalSubmitInteraction, values: { tot
   const guild = interaction.guild_id
   const distributor = interaction.member?.user.id
   if (!guild || !distributor || !interaction.channel_id) throw new InputError('서버 안에서 사용해 주세요.')
-  const raw = typeof values.total === 'string' ? values.total.trim() : ''
-  const total = Number(raw.replaceAll(',', ''))
-  if (!/^(\d+|\d{1,3}(,\d{3})+)$/.test(raw) || !Number.isSafeInteger(total) || total <= 0) {
-    throw new InputError('총 판매금액은 숫자와 세 자리마다의 쉼표만 써서 1 이상인 안전한 정수로 입력해 주세요.')
+  const raw = typeof values.total === 'string' ? values.total.trim().replaceAll(',', '') : ''
+  const total = Number(raw)
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(total) || total <= 0) {
+    throw new InputError('총 판매금액은 숫자로 입력해 주세요. 1 이상인 안전한 정수여야 해요.')
   }
   if (values.fee !== '3' && values.fee !== '5') throw new InputError(splitErrorMessages.INVALID_FEE)
   const fee = Number(values.fee) as 3 | 5

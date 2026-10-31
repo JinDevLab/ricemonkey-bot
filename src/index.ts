@@ -1,8 +1,9 @@
 import { DiscordHono, $webhooks$_$_, $webhooks$_$_$messages$original, $channels$_$threads, $channels$_$threadmembers$_, $channels$_$messages, $channels$_$messages$_$reactions$_$me } from 'discord-hono'
 import type { CommandContext, ComponentContext, ModalContext } from 'discord-hono'
-import { PermissionFlagsBits } from 'discord-api-types/v10'
+import { PermissionFlagsBits, SelectMenuDefaultValueType } from 'discord-api-types/v10'
 import type { APILabelComponent, APIModalInteractionResponseCallbackData } from 'discord-api-types/v10'
-import { cancelSplit, createSplit, deleteSplit, getSplit, history, markPurchased, markUploaded, purgeExpired, savePercent, unfinished } from './db'
+import { cancelSplit, consumeDraft, createSplit, deleteSplit, getDraft, getSplit, history, markPurchased, markUploaded, purgeExpired, replaceDraft, saveDraft, savePercent, unfinished } from './db'
+import type { StoredSplit } from './db'
 import { adjustPercent, buildSplit, InputError } from './input'
 import { cardShowsMember, escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from './render'
 
@@ -84,15 +85,18 @@ function updateWithNotification(
   })
 }
 
-function splitModal(custom_id: string, title: string): APIModalInteractionResponseCallbackData {
+function splitModal(custom_id: string, title: string, stored?: StoredSplit): APIModalInteractionResponseCallbackData {
   return { custom_id, title, components: [
     { type: 18, label: '총판매금액', description: '수수료를 빼기 전 금액', component: {
-      type: 4, style: 1, custom_id: 'total', required: true, max_length: 21, placeholder: '240000000',
+      type: 4, style: 1, custom_id: 'total', required: true, max_length: 21,
+      ...(stored ? { value: String(stored.split.total_sale) } : {}),
     } },
     { type: 18, label: '수수료', component: { type: 21, custom_id: 'fee', required: true,
-      options: [{ label: '3%', value: '3' }, { label: '5%', value: '5' }] } },
+      options: ([3, 5] as const).map((fee) => ({ label: `${fee}%`, value: String(fee),
+        ...(stored ? { default: stored.split.sale_fee_percent === fee } : {}) })) } },
     { type: 18, label: '파티원', description: '1~5명, 본인 제외', component: {
       type: 5, custom_id: 'members', min_values: 1, max_values: 5,
+      ...(stored ? { default_values: stored.members.map((m) => ({ id: m.user_id, type: SelectMenuDefaultValueType.User })) } : {}),
     } },
   ] }
 }
@@ -122,7 +126,7 @@ function checkPrivateChannel(c: Context) {
 app.command('분배패널', guarded<CommandContext<Env>>(async (c) => {
   checkPrivateChannel(c)
   return c.res({
-    content: '버튼을 누르면 입력 창이 열려요. 제출하면 선택한 파티원과의 비공개 스레드가 열려요.\n스레드 관리 권한자는 초대 없이 볼 수 있어요. /분배는 채널에 공개돼요.',
+    content: '버튼을 누르면 입력 창이 열려요. 제출 뒤 나만 보기 금액 안내에서 확인을 누르면 선택한 파티원과의 비공개 스레드가 열려요.\n스레드 관리 권한자는 초대 없이 볼 수 있어요. /분배는 채널에 공개돼요.',
     allowed_mentions: { parse: [], users: [] },
     components: [{ type: 1, components: [{ type: 2, style: 1, custom_id: 'private-split', label: '비공개 분배 만들기' }] }],
   })
@@ -137,25 +141,110 @@ app.component('private-split', guarded<ComponentContext<Env>>(async (c) => {
 async function privateReply(c: ComponentContext<Env> | ModalContext<Env>, content: string) {
   try {
     const response = await c.rest('PATCH', $webhooks$_$_$messages$original,
-      [c.interaction.application_id, c.interaction.token], { content, allowed_mentions: { parse: [], users: [] } })
+      [c.interaction.application_id, c.interaction.token], { content, embeds: [], components: [], allowed_mentions: { parse: [], users: [] } })
     if (!response.ok) console.error('private response failed', { status: response.status })
   } catch {
     console.error('private response failed', { status: null })
   }
 }
 
-app.modal('private-split', guarded<ModalContext<Env>>(async (c) => {
-  const stored = buildSplit(c.interaction, { total: c.get('total'), fee: c.get('fee'), members: c.get('members') })
-  if (!c.env.DISCORD_TOKEN) return reject(c, `${privateFailure} 봇 토큰 설정이 필요해요.`)
-  checkPrivateChannel(c)
-  for (const member of stored.members) {
-    const permissions = c.interaction.data.resolved?.members?.[member.user_id]?.permissions
-    if (permissions !== undefined && (BigInt(permissions) & PermissionFlagsBits.ViewChannel) === 0n) {
-      return reject(c, `<@${member.user_id}>님에게 이 채널을 볼 권한이 없어요.`)
-    }
-  }
+const expiredDraft = '이미 처리했거나 만료된 확인이에요. 다시 만들어 주세요.'
+
+async function draftContext(c: ComponentContext<Env> | ModalContext<Env>) {
+  const guild = c.interaction.guild_id
+  const user = c.interaction.member?.user.id
+  if (!guild || !user) throw new InputError('서버 안에서 사용해 주세요.')
+  const id = c.ref.custom_value
+  if (!id || id.includes(';')) throw new InputError(expiredDraft)
   const db = database(c)
-  return c.update(false).flags('EPHEMERAL').resDefer(async () => {
+  const stored = await getDraft(db, id, guild, user)
+  if (!stored) throw new InputError(expiredDraft)
+  if (stored.split.channel_id !== c.interaction.channel_id) throw new InputError(expiredDraft)
+  return { db, id, guild, user, stored }
+}
+
+function privatePreflight(c: Context) {
+  if (!c.env.DISCORD_TOKEN) throw new InputError(`${privateFailure} 봇 토큰 설정이 필요해요.`)
+  checkPrivateChannel(c)
+  database(c)
+}
+
+function preview(stored: StoredSplit, id: string) {
+  return {
+    content: [`총판매금액: ${money(stored.split.total_sale)} (${stored.split.total_sale})`,
+      `수수료: ${stored.split.sale_fee_percent}%`,
+      `파티원: ${stored.members.map((m) => `<@${m.user_id}>`).join(' ')}`,
+      `게시 위치: ${stored.split.private_thread ? '비공개 스레드' : '이 채널에 공개'}`,
+      '금액을 확인한 뒤 확인을 눌러 주세요.'].join('\n'),
+    embeds: [], allowed_mentions: { parse: [], users: [] },
+    components: [{ type: 1 as const, components: [
+      { type: 2 as const, style: 3 as const, custom_id: `confirm-split;${id}`, label: '확인' },
+      { type: 2 as const, style: 2 as const, custom_id: `edit-split;${id}`, label: '다시 입력' },
+    ] }],
+  }
+}
+
+for (const key of ['split', 'private-split', 'edit-split'] as const) {
+  app.modal(key, guarded<ModalContext<Env>>(async (c) => {
+    const previous = key === 'edit-split' ? await draftContext(c) : undefined
+    if (previous && !c.interaction.message) throw new InputError(expiredDraft)
+    const stored = buildSplit(c.interaction, { total: c.get('total'), fee: c.get('fee'), members: c.get('members') })
+    stored.split.private_thread = previous?.stored.split.private_thread ?? (key === 'private-split' ? 1 : 0)
+    if (stored.split.private_thread) {
+      privatePreflight(c)
+      for (const member of stored.members) {
+        const permissions = c.interaction.data.resolved?.members?.[member.user_id]?.permissions
+        if (permissions !== undefined && (BigInt(permissions) & PermissionFlagsBits.ViewChannel) === 0n) {
+          throw new InputError(`<@${member.user_id}>님에게 이 채널을 볼 권한이 없어요.`)
+        }
+      }
+    }
+    const db = database(c)
+    if (previous) {
+      if (!await replaceDraft(db, previous.id, previous.guild, previous.user, stored)) throw new InputError(expiredDraft)
+      return c.update().res(preview(stored, previous.id))
+    }
+    await saveDraft(db, stored)
+    // A panel-origin modal carries the public panel message. Never update that message.
+    return c.update(false).flags('EPHEMERAL').res(preview(stored, stored.split.id))
+  }))
+}
+
+app.component('edit-split', guarded<ComponentContext<Env>>(async (c) => {
+  const { stored, id } = await draftContext(c)
+  return c.resModal(splitModal(`edit-split;${id}`, stored.split.private_thread ? '비공개 분배' : '분배', stored))
+}))
+
+app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
+  const { db, id, guild, user, stored: pending } = await draftContext(c)
+  if (pending.split.private_thread) privatePreflight(c)
+  const stored = await consumeDraft(db, id, guild, user)
+  if (!stored) throw new InputError(expiredDraft)
+  stored.split.created_at = new Date().toISOString()
+  if (!stored.split.private_thread) {
+    try {
+      await createSplit(db, stored)
+    } catch {
+      console.error('public split save', { status: null })
+      return reject(c, '분배를 저장하지 못했어요. 다시 만들어 주세요.')
+    }
+    if (!c.env.DISCORD_TOKEN) return c.update(false).res(renderSplit(stored))
+    return c.update().res({ content: '카드를 올렸어요', embeds: [], components: [], allowed_mentions: { parse: [], users: [] } }, undefined, async (response) => {
+      if (!response.ok) {
+        console.error('public split callback', { status: response.status })
+        return
+      }
+      let status: number | null = null
+      try {
+        const card = await c.rest('POST', $webhooks$_$_, [c.interaction.application_id, c.interaction.token], renderSplit(stored))
+        if (card.ok) return
+        status = card.status
+      } catch {}
+      console.error('public card post', { status })
+      await privateReply(c, '카드를 올리지 못했어요. /미완료로 다시 올려 주세요.')
+    })
+  }
+  return c.update().resDefer(async () => {
     let action = 'private thread create'
     let status: number | null = null
     let failure = privateFailure
@@ -210,12 +299,6 @@ app.modal('private-split', guarded<ModalContext<Env>>(async (c) => {
       await privateReply(c, failure)
     }
   })
-}))
-
-app.modal('split', guarded<ModalContext<Env>>(async (c) => {
-  const stored = buildSplit(c.interaction, { total: c.get('total'), fee: c.get('fee'), members: c.get('members') })
-  await createSplit(database(c), stored)
-  return c.res(renderSplit(stored))
 }))
 
 const percentLocked = '이미 경매장 등록을 한 파티원이 있어서 비율을 바꿀 수 없어요.'

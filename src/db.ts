@@ -34,6 +34,29 @@ export interface StoredSplit {
   members: MemberRow[]
 }
 
+export async function saveDraft(db: D1Database, stored: StoredSplit) {
+  await db.prepare('INSERT INTO split_drafts (id, guild_id, user_id, payload, created_at) VALUES (?, ?, ?, ?, ?)')
+    .bind(stored.split.id, stored.split.guild_id, stored.split.distributor_id, JSON.stringify(stored), stored.split.created_at).run()
+}
+
+export async function getDraft(db: D1Database, id: string, guild: string, user: string): Promise<StoredSplit | null> {
+  const payload = await db.prepare('SELECT payload FROM split_drafts WHERE id = ? AND guild_id = ? AND user_id = ?')
+    .bind(id, guild, user).first<string>('payload')
+  return payload ? JSON.parse(payload) as StoredSplit : null
+}
+
+export async function replaceDraft(db: D1Database, id: string, guild: string, user: string, stored: StoredSplit) {
+  const result = await db.prepare('UPDATE split_drafts SET payload = ? WHERE id = ? AND guild_id = ? AND user_id = ?')
+    .bind(JSON.stringify(stored), id, guild, user).run()
+  return result.meta.changes > 0
+}
+
+export async function consumeDraft(db: D1Database, id: string, guild: string, user: string): Promise<StoredSplit | null> {
+  const payload = await db.prepare('DELETE FROM split_drafts WHERE id = ? AND guild_id = ? AND user_id = ? RETURNING payload')
+    .bind(id, guild, user).first<string>('payload')
+  return payload ? JSON.parse(payload) as StoredSplit : null
+}
+
 export async function createSplit(db: D1Database, { split, members }: StoredSplit) {
   await db.batch([
     db.prepare(`INSERT INTO splits
@@ -68,11 +91,12 @@ export async function purgeExpired(db: D1Database, now: Date) {
   const lastDay = new Date(Date.UTC(cutoff.getUTCFullYear(), cutoff.getUTCMonth() + 1, 0)).getUTCDate()
   cutoff.setUTCDate(Math.min(day, lastDay))
   const before = cutoff.toISOString()
-  const [members, splits] = await db.batch([
+  const [members, splits, drafts] = await db.batch([
     db.prepare('DELETE FROM split_members WHERE split_id IN (SELECT id FROM splits WHERE created_at < ?)').bind(before),
     db.prepare('DELETE FROM splits WHERE created_at < ?').bind(before),
+    db.prepare('DELETE FROM split_drafts WHERE created_at < ?').bind(new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()),
   ])
-  return { members: members.meta.changes, splits: splits.meta.changes }
+  return { members: members.meta.changes, splits: splits.meta.changes, drafts: drafts.meta.changes }
 }
 
 export async function getSplit(db: D1Database, id: string, guild: string): Promise<StoredSplit | null> {

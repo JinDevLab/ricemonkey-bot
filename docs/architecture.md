@@ -47,12 +47,14 @@ D1의 일일 한도는 00:00 UTC에 초기화된다.
 - 최초 응답은 3초 안에 해야 한다. interaction token은 15분만 유효하므로 DB에 저장해 두고 쓰지 않는다.
 - 버튼은 고정 `custom_id`와 DB 조회로 처리해 재배포 후에도 동작하게 한다.
 - 공개 분배의 안내, 상태 변경, 알림은 상호작용 응답으로 처리한다. 비공개 생성·다른 채널에서의 비공개 재게시 카드는 REST로 원래 스레드에만 보내고, 상호작용에는 본인 전용 지연 응답과 링크·실패 안내만 보낸다.
-- `split`과 `private-split` 모달은 하나의 필드 정의를 공유한다. 패널 버튼 모달은 message가 붙어도 `update(false)`와 EPHEMERAL의 type 5로 지연하여 패널을 갱신하지 않는다. `resDefer`의 waitUntil에서 생성·초대·저장·게시를 순서대로 수행하고 모든 예외를 잡는다.
+- `split`과 `private-split` 모달은 하나의 필드 정의를 공유한다. 처음 제출할 때는 패널 message가 붙어도 `update(false)`와 EPHEMERAL의 type 4로 새 미리보기를 보내 패널을 갱신하지 않는다. 비공개 확인은 type 6 지연 갱신 뒤 `resDefer`의 waitUntil에서 기존 생성·초대·저장·게시를 순서대로 수행하고 모든 예외를 잡는다. PATCH @original에는 빈 embeds·components를 넣어 금액·버튼을 지운다.
+- 0004 `split_drafts`는 id, guild_id, user_id, StoredSplit JSON payload, created_at을 저장한다. payload의 채널 ID는 원래 채널이며 private_thread로 종류를 유지한다. 조회·교체·`DELETE ... RETURNING payload` 소비에 서버와 작성자 조건을 넣는다. custom_id에는 동작 키와 임시 ID만 담는다. 수정은 같은 행의 payload만 바꾸고, 확인은 소비한 최신 payload로 만들며 분배 created_at을 확인 시각으로 바꾼다. 생성 후 24시간보다 오래된 임시 행은 기존 3개월 정리와 같은 batch에서 삭제하고 건수만 추가 기록한다.
+- 공개 확인은 createSplit 뒤 type 7 callback으로 미리보기를 완료 안내로 바꾸고 callback 성공 후 웹훅 POST로 공개 카드를 게시한다. 실패하면 동작 이름·status만 로그에 남기고 PATCH @original에 `/미완료` 복구를 안내한다. 토큰이 없으면 type 4 공개 카드를 반환한다. 저장 실패는 새 나만 보기 응답이다.
 - discord-hono 0.23.0의 `followup`은 환경의 `DISCORD_APPLICATION_ID`를 요구한다. 현재 바인딩을 늘리지 않고 interaction.application_id를 사용한 원본 응답 PATCH로 동일한 지연 응답 편집을 한다. private 경로 로그에는 동작 이름·status만 남기며 예외 객체나 메시지를 출력하지 않는다.
 - 0003 마이그레이션은 `splits.private_thread INTEGER NOT NULL DEFAULT 0`을 추가한다. 공개·기존 행은 0, 비공개는 1과 스레드 channel_id를 저장한다. 모든 사용자 초대 성공 전에는 저장하지 않는다. 카드 POST가 4xx(429 포함)로 거절되면 멤버·분배를 하나의 D1 batch로 삭제하고 삭제도 실패하면 비공개 `/미완료` 재게시를 안내한다. 5xx·네트워크 예외는 게시 결과가 불명확하므로 행을 유지하고 스레드 확인 후 카드가 없으면 `/미완료`로 복구한다. 저장 예외는 커밋 여부가 불명확하므로 삭제를 시도하며 삭제까지 실패하면 `/미완료`에 보이는 경우 재게시하도록 안내한다. 자동 재시도와 공개 fallback은 없다.
 - 스레드 생성은 type 12, invitable false, auto_archive_duration 10080이다. 완료 시 잠금·보관과 제외자 추방을 하지 않으며 Manage Threads 없이 동작하도록 구현했다. 다만 `invitable: false` 스레드에 봇이 파티원을 추가할 수 있는지는 실제 Discord에서 아직 확인하지 않았다. 비공개 재게시 실패는 본인 전용 안내로 끝난다. Discord의 메시지 전송에 따른 보관 해제는 실환경 미확인이다.
 - 동시 클릭으로 상태가 덮어써지지 않도록 파티원별 상태를 개별 행으로 갱신한다.
-- `/분배`는 옵션 없이 Label 모달(`split`)을 열고 제출에는 새 공개 메시지(type 4)로 응답한다. 버튼에서 연 `percent;<id>`·`item;<id>` 모달은 message가 있는 제출에만 type 7을 사용한다. Label 내부의 Text Input·Radio Group은 value, User Select는 values를 `c.get(custom_id)`로 읽는다.
+- `/분배`는 옵션 없이 Label 모달(`split`)을 열고 제출에는 새 나만 보기 미리보기(type 4 + ephemeral)로 응답한다. `edit-split;<draftId>` 버튼은 금액 value·라디오 옵션 default·사용자 선택 default_values로 미리 채운 창을 열고 제출 시 같은 미리보기를 type 7로 갱신한다. 세 필드는 [공식 컴포넌트 문서](https://docs.discord.com/developers/components/reference)와 설치된 discord-api-types에서 지원을 확인했다. 설치 타입의 User Select 설명에는 메시지 전용이라는 오래된 주석이 있지만 Label union과 공식 문서는 모달을 지원한다. 버튼에서 연 `percent;<id>`·`item;<id>` 모달은 message가 있는 제출에만 type 7을 사용한다. Label 내부의 Text Input·Radio Group은 value, User Select는 values를 `c.get(custom_id)`로 읽는다.
 - 비율 변경은 하나의 D1 batch에서 부모·모든 멤버를 함께 저장한다. 모든 UPDATE에 서버·분배자·active·등록/구매자 없음 조건을 걸고 멤버는 pending/excluded만 허용한다. 경매장 등록이 먼저 저장되면 비율은 어느 행도 바뀌지 않는다. 새 마이그레이션은 없다.
 
 ## 6. CI/CD
@@ -70,6 +72,7 @@ GitHub Actions CI를 `.github/workflows/ci.yml`에 구현했다. 로컬에서도
 - 매일 `0 18 * * *`(KST 03:00) Cron으로 생성 후 3개월 지난 모든 상태의 분배를 삭제한다. UTC 월말을 보정하고 같은 D1 batch에서 멤버 다음 분배 순서로 삭제한다. 성공은 건수만, 실패는 오류 이름만 기록하고 자동 재시도하지 않는다.
 
 ## 7. 미검증 사항
+- 나만 보기 메시지 버튼에서 공개 후속 메시지 게시, 같은 미리보기 갱신, 입력창의 금액·수수료·파티원 미리 채움 실제 표시. 공식 필드 지원 확인과 fetch mock 검사는 실환경 확인이 아니다.
 - Workers와 D1만 쓸 때 가입에 카드가 필요 없는지는 공식 문서에서 확인하지 못했다.
 - 0.4.0은 배포됐고 소유자가 테스트 서버에서 입력·카드·비율·등록·구매를 확인했다. 실제 파티 사용·전역 표시는 1.0 판단에서 확인된 것으로 간주하는 소유자 결정이며 실제 실행 기록이 아니다.
 - 소유자가 Metrics에서 호출 72회, 오류 0, CPU 2ms, Wall 201ms를 봤다. 통계 종류는 화면에서 확인하지 못했고 적은 트래픽 관측이므로 CPU 한도 내 동작을 일반적으로 보장하지 않는다.

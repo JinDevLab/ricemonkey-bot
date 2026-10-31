@@ -25,7 +25,7 @@ let background: Promise<unknown>[] = []
 beforeAll(async () => {
   platform = await getPlatformProxy({ persist: false, envFiles: ['test/.no-secrets.env'] })
   db = (platform.env as { DB: D1Database }).DB
-  for (const migration of ['0001_init.sql', '0002_item_name.sql', '0003_private_thread.sql']) {
+  for (const migration of ['0001_init.sql', '0002_item_name.sql', '0003_private_thread.sql', '0004_split_drafts.sql']) {
     const sql = await readFile(new URL(`../migrations/${migration}`, import.meta.url), 'utf8')
     for (const statement of sql.split(';').filter((s) => s.trim())) await db.prepare(statement).run()
     if (migration === '0001_init.sql') {
@@ -47,7 +47,7 @@ beforeAll(async () => {
 }, 60000)
 afterAll(async () => { await platform?.dispose() })
 beforeEach(async () => {
-  await db.batch([db.prepare('DELETE FROM split_members'), db.prepare('DELETE FROM splits')])
+  await db.batch([db.prepare('DELETE FROM split_members'), db.prepare('DELETE FROM splits'), db.prepare('DELETE FROM split_drafts')])
   background = []
 })
 afterEach(async () => { await Promise.all(background); vi.restoreAllMocks(); vi.unstubAllGlobals() })
@@ -124,8 +124,14 @@ function percentAnswers(options: Options, members: { user_id: string }[]) {
     ...members.map((m, i) => [m.user_id, options[`파티원${i + 1}퍼센트`]]),
   ])
 }
+async function confirmed(payload = command()) {
+  const preview = await json(payload)
+  expect(preview).toMatchObject({ type: 4, data: { flags: 64, allowed_mentions: { parse: [], users: [] } } })
+  const id = preview.data.components[0].components[0].custom_id.split(';')[1]
+  return json(component('confirm-split', id))
+}
 async function create(options?: Options) {
-  const response = await json(command('분배', options))
+  const response = await confirmed(command('분배', options))
   expect(response.type).toBe(4)
   expect(response.data.flags).toBeUndefined()
   const id = response.data.components[0].components[0].custom_id.split(';')[1] as string
@@ -151,6 +157,237 @@ async function redraw(payload: unknown) {
 }
 const defaults = { 총판매금액: 100000000, 수수료: 5, 파티원1: first }
 
+describe('split confirmation drafts', () => {
+  const expired = '이미 처리했거나 만료된 확인이에요. 다시 만들어 주세요.'
+  const draftId = (response: any) => response.data.components[0].components[0].custom_id.split(';')[1] as string
+  async function count(table: string) { return db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first('n') }
+  function privatePayload() {
+    return { ...command(), channel: { type: 0 }, message: { id: 'panel' },
+      data: { ...command().data, custom_id: 'private-split' } }
+  }
+  function rest(failure = '') {
+    const calls: { url: string; method: string; body: any }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, method: init.method!, body: init.body ? JSON.parse(init.body as string) : null })
+      if ((failure === 'http' || failure === 'network') && url.includes('/webhooks/') && init.method === 'POST') {
+        if (failure === 'network') throw new Error('fake-token sensitive')
+        return new Response('{}', { status: 500 })
+      }
+      return new Response(JSON.stringify(url.endsWith('/threads') ? { id: '900', type: 12 } : {}))
+    }))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    return calls
+  }
+  it.each([false, true])('only saves a silent ephemeral preview on submission (private=%s)', async (privateSplit) => {
+    const calls = rest()
+    const response = await json(privateSplit ? privatePayload() : command(), true)
+    expect(response).toMatchObject({ type: 4, data: { flags: 64, embeds: [], allowed_mentions: { parse: [], users: [] } } })
+    expect(response.data.content).toContain(`${money(100000000)} (100000000)`)
+    expect(response.data.content).toContain('수수료: 5%')
+    expect(response.data.content).toContain(`<@${first}>`)
+    expect(response.data.content).toContain(privateSplit ? '비공개 스레드' : '이 채널에 공개')
+    expect(response.data.components[0].components.map((b: any) => [b.label, b.style])).toEqual([['확인', 3], ['다시 입력', 2]])
+    expect(await count('splits')).toBe(0)
+    expect(await count('split_members')).toBe(0)
+    expect(await count('split_drafts')).toBe(1)
+    expect(calls).toEqual([])
+    const stored = await databaseModule.getDraft(db, draftId(response), 'guild', distributor)
+    expect(stored!.split).toMatchObject({ channel_id: 'channel', private_thread: privateSplit ? 1 : 0 })
+  })
+  it.each(['2400,000', ',2400000,', '2,4,0,0,0,0,0', ' 2,400,000 '])('strips all commas in %s', (total) => {
+    const stored = buildSplit(command('분배', { ...defaults, 총판매금액: total }) as unknown as APIModalSubmitInteraction)
+    expect(stored.split.total_sale).toBe(2400000)
+  })
+  it.each([',,,', '0', '-1', '문자', '2 400', '1.1', '9007199254740992'])('rejects invalid amount %s without drafts', async (total) => {
+    await ephemeral(command('분배', { ...defaults, 총판매금액: total }), '총 판매금액은 숫자로 입력해 주세요. 1 이상인 안전한 정수여야 해요.')
+    expect(await count('split_drafts')).toBe(0)
+  })
+  it('confirms without a token once, replacing created_at with confirmation time', async () => {
+    const response = await json(command())
+    const id = draftId(response)
+    const pending = (await databaseModule.getDraft(db, id, 'guild', distributor))!
+    pending.split.created_at = '2000-01-01T00:00:00.000Z'
+    await databaseModule.replaceDraft(db, id, 'guild', distributor, pending)
+    const calls = rest()
+    const card = await json(component('confirm-split', id))
+    expect(card).toMatchObject({ type: 4 })
+    expect(card.data.flags).toBeUndefined()
+    expect(card.data.embeds).toHaveLength(1)
+    await ephemeral(component('confirm-split', id), expired)
+    expect(await count('splits')).toBe(1)
+    expect(await count('split_drafts')).toBe(0)
+    expect((await getSplit(db, pending.split.id, 'guild'))!.split.created_at).not.toBe(pending.split.created_at)
+    expect(calls).toEqual([])
+  })
+  it('atomically consumes concurrent double confirmation', async () => {
+    const id = draftId(await json(command()))
+    const results = await Promise.all([json(component('confirm-split', id)), json(component('confirm-split', id))])
+    expect(results.filter((r) => r.data.embeds?.length)).toHaveLength(1)
+    expect(results.filter((r) => r.data.content === expired)).toHaveLength(1)
+    expect(await count('splits')).toBe(1)
+  })
+  it('creates only one private thread and split on concurrent confirmation', async () => {
+    const id = draftId(await json(privatePayload(), true))
+    const calls = rest()
+    const results = await Promise.all([json(component('confirm-split', id), true), json(component('confirm-split', id), true)])
+    await Promise.all(background)
+    expect(results.filter((r) => r.type === 6)).toHaveLength(1)
+    expect(results.filter((r) => r.data?.content === expired)).toHaveLength(1)
+    expect(calls.filter((c) => c.url.endsWith('/threads'))).toHaveLength(1)
+    expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/webhooks/'))).toHaveLength(0)
+    expect(calls.filter((c) => c.method === 'POST' && c.url.endsWith('/channels/channel/messages'))).toHaveLength(0)
+    expect(await count('splits')).toBe(1)
+  })
+  it.each(['confirm-split', 'edit-split'])('rejects another author or guild at %s and leaves the draft', async (action) => {
+    const id = draftId(await json(command()))
+    await ephemeral(component(action, id, first), expired)
+    await ephemeral(component(action, id, distributor, undefined, 'other'), expired)
+    await ephemeral(component(action, `${id};extra`), expired)
+    await ephemeral({ ...component(action, id), channel_id: 'other-channel' }, expired)
+    expect(await count('split_drafts')).toBe(1)
+    expect(await count('splits')).toBe(0)
+    expect(await databaseModule.consumeDraft(db, id, 'other', distributor)).toBeNull()
+    expect(await databaseModule.consumeDraft(db, id, 'guild', first)).toBeNull()
+    expect(await databaseModule.replaceDraft(db, id, 'guild', first, buildSplit(command() as any))).toBe(false)
+  })
+  it.each(['', 'http', 'network'])('updates preview then posts a public followup, handling %s failure', async (failure) => {
+    const id = draftId(await json(command()))
+    const calls = rest(failure)
+    expect((await request(component('confirm-split', id), true)).status).toBe(202)
+    await Promise.all(background)
+    expect(calls[0].url).toContain('/callback')
+    expect(calls[0].body).toEqual({ type: 7, data: { content: '카드를 올렸어요', embeds: [], components: [], allowed_mentions: { parse: [], users: [] } } })
+    expect(calls[1].method).toBe('POST')
+    expect(calls[1].url).toMatch(/\/webhooks\/app\/fake-token$/)
+    expect(calls[1].body).toEqual(renderSplit((await getSplit(db, id, 'guild'))!))
+    if (failure) {
+      expect(calls[2]).toMatchObject({ method: 'PATCH', body: { content: '카드를 올리지 못했어요. /미완료로 다시 올려 주세요.', embeds: [], components: [] } })
+      expect(console.error).toHaveBeenCalledWith('public card post', { status: failure === 'http' ? 500 : null })
+    } else expect(calls).toHaveLength(2)
+    expect(await count('splits')).toBe(1)
+    await ephemeral(component('confirm-split', id), expired)
+  })
+  it('does not publish after a rejected public callback', async () => {
+    const id = draftId(await json(command()))
+    const fetch = vi.fn(async () => new Response('{}', { status: 400 }))
+    vi.stubGlobal('fetch', fetch)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await request(component('confirm-split', id), true)
+    await Promise.all(background)
+    expect(fetch).toHaveBeenCalledOnce()
+    expect(await count('splits')).toBe(1)
+  })
+  it('rejects a public save failure privately after consumption', async () => {
+    const id = draftId(await json(command()))
+    const calls = rest()
+    vi.spyOn(databaseModule, 'createSplit').mockRejectedValueOnce(new Error('sensitive'))
+    await ephemeral(component('confirm-split', id), '분배를 저장하지 못했어요. 다시 만들어 주세요.')
+    expect(calls).toHaveLength(0)
+    expect(await count('split_drafts')).toBe(0)
+    expect(await count('splits')).toBe(0)
+  })
+  it.each(['token', 'channel', 'permissions', 'db'])('checks private %s before consumption', async (failure) => {
+    const id = draftId(await json(privatePayload(), true))
+    const calls = rest()
+    const payload = { ...component('confirm-split', id),
+      ...(failure === 'channel' ? { channel: { type: 12 } } : {}),
+      ...(failure === 'permissions' ? { app_permissions: '0' } : {}) }
+    const response = await (await request(payload, failure !== 'token', failure === 'db' ? null : db)).json() as any
+    expect(response).toMatchObject({ type: 4, data: { flags: 64 } })
+    expect(await count('split_drafts')).toBe(1)
+    expect(calls).toHaveLength(0)
+  })
+  it.each([false, true])('prefills, replaces and updates the same preview, preserving private=%s', async (privateSplit) => {
+    const calls = rest()
+    const initial = await json(privateSplit ? privatePayload() : command(), true)
+    const id = draftId(initial)
+    const open = await json(component('edit-split', id))
+    expect(open).toMatchObject({ type: 9, data: { custom_id: `edit-split;${id}`, title: privateSplit ? '비공개 분배' : '분배' } })
+    expect(open.data.components[0].component).toMatchObject({ value: '100000000' })
+    expect(open.data.components[0].component).not.toHaveProperty('placeholder')
+    expect(open.data.components[1].component.options).toEqual([{ label: '3%', value: '3', default: false }, { label: '5%', value: '5', default: true }])
+    expect(open.data.components[2].component.default_values).toEqual([{ id: first, type: 'user' }])
+    const payload = command('분배', { ...defaults, 총판매금액: '2400,000', 수수료: 3, 파티원1: second })
+    payload.data.custom_id = open.data.custom_id
+    const changed = await json({ ...payload, message: { id: 'preview', flags: 64 } }, true)
+    expect(changed.type).toBe(7)
+    expect(changed.data.flags).toBeUndefined()
+    expect(changed.data.content).toContain('(2400000)')
+    expect(changed.data.content).toContain(`<@${second}>`)
+    expect(changed.data.allowed_mentions).toEqual({ parse: [], users: [] })
+    expect(draftId(changed)).toBe(id)
+    const stored = (await databaseModule.getDraft(db, id, 'guild', distributor))!
+    expect(stored.split).toMatchObject({ total_sale: 2400000, sale_fee_percent: 3, private_thread: privateSplit ? 1 : 0 })
+    expect(stored.members[0].user_id).toBe(second)
+    expect(await count('split_drafts')).toBe(1)
+    expect(await count('splits')).toBe(0)
+    expect(calls).toHaveLength(0)
+    await databaseModule.consumeDraft(db, id, 'guild', distributor)
+    await ephemeral(component('edit-split', id), expired)
+    await ephemeral({ ...payload, message: { id: 'preview' } }, expired)
+  })
+  it.each([false, true])('confirms the replacement payload in its original mode (private=%s)', async (privateSplit) => {
+    const id = draftId(await json(privateSplit ? privatePayload() : command(), true))
+    const payload = command('분배', { ...defaults, 총판매금액: '2400,000', 수수료: 3, 파티원1: second })
+    payload.data.custom_id = `edit-split;${id}`
+    await json({ ...payload, message: { id: 'preview' } }, true)
+    const replacement = (await databaseModule.getDraft(db, id, 'guild', distributor))!
+    const calls = rest()
+    const result = await request(component('confirm-split', id), true)
+    if (privateSplit) expect(await result.json()).toEqual({ type: 6 })
+    else expect(result.status).toBe(202)
+    await Promise.all(background)
+    const saved = (await getSplit(db, replacement.split.id, 'guild'))!
+    expect(saved.split).toMatchObject({ total_sale: 2400000, sale_fee_percent: 3, private_thread: privateSplit ? 1 : 0,
+      channel_id: privateSplit ? '900' : 'channel' })
+    expect(saved.members[0].user_id).toBe(second)
+    expect(await count('splits')).toBe(1)
+    expect(await count('split_drafts')).toBe(0)
+    if (privateSplit) expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/webhooks/'))).toHaveLength(0)
+  })
+  it('keeps the previous draft on invalid edit and rejects a consumed edit race', async () => {
+    const id = draftId(await json(command()))
+    const previous = await databaseModule.getDraft(db, id, 'guild', distributor)
+    const payload = command()
+    payload.data.custom_id = `edit-split;${id}`
+    payload.data.components[0].component.value = 'bad'
+    await ephemeral({ ...payload, message: { id: 'preview' } })
+    expect(await databaseModule.getDraft(db, id, 'guild', distributor)).toEqual(previous)
+    payload.data.components[0].component.value = '2400000'
+    const replace = databaseModule.replaceDraft
+    vi.spyOn(databaseModule, 'replaceDraft').mockImplementationOnce(async (...args) => {
+      await databaseModule.consumeDraft(db, id, 'guild', distributor)
+      return replace(...args)
+    })
+    await ephemeral({ ...payload, message: { id: 'preview' } }, expired)
+    expect(await count('split_drafts')).toBe(0)
+    expect(await count('splits')).toBe(0)
+  })
+  it('applies the draft migration and purges only beyond 24 hours in the same atomic batch', async () => {
+    const columns = await db.prepare('PRAGMA table_info(split_drafts)').all<{ name: string }>()
+    expect(columns.results.map((c) => c.name)).toEqual(['id', 'guild_id', 'user_id', 'payload', 'created_at'])
+    const now = new Date('2026-11-01T12:00:00.000Z')
+    const ids: string[] = []
+    for (const time of ['2026-10-31T11:59:59.999Z', '2026-10-31T12:00:00.000Z', '2026-10-31T12:00:00.001Z']) {
+      const stored = buildSplit(command() as any)
+      stored.split.created_at = time
+      ids.push(stored.split.id)
+      await databaseModule.saveDraft(db, stored)
+    }
+    const split = await create()
+    await db.prepare('UPDATE splits SET created_at = ? WHERE id = ?').bind('2000-01-01T00:00:00.000Z', split).run()
+    await db.prepare(`CREATE TRIGGER fail_draft_purge BEFORE DELETE ON split_drafts BEGIN SELECT RAISE(ABORT, 'blocked'); END`).run()
+    try {
+      await expect(databaseModule.purgeExpired(db, now)).rejects.toThrow()
+      expect(await getSplit(db, split, 'guild')).not.toBeNull()
+      expect(await count('split_drafts')).toBe(3)
+    } finally { await db.prepare('DROP TRIGGER fail_draft_purge').run() }
+    expect(await databaseModule.purgeExpired(db, now)).toEqual({ members: 1, splits: 1, drafts: 1 })
+    expect(await databaseModule.getDraft(db, ids[0], 'guild', distributor)).toBeNull()
+    for (const id of ids.slice(1)) expect(await databaseModule.getDraft(db, id, 'guild', distributor)).not.toBeNull()
+  })
+})
+
 describe('private thread splits', () => {
   const permissions = '343597466688'
   const thread = '900'
@@ -172,7 +409,8 @@ describe('private thread splits', () => {
     const replies = calls.filter((c) => c.method === 'PATCH' && c.url.endsWith('/messages/@original')).map((c) => c.body)
     if (response) replies.push(response.data)
     for (const body of replies) {
-      expect(body).not.toHaveProperty('embeds')
+      expect(body.embeds ?? []).toEqual([])
+      expect(body.components ?? []).toEqual([])
       expect(JSON.stringify(body)).not.toMatch(/메소|100000000|100,000,000|95000000|95,000,000|1억0000만0000|48223350|4822만3350|4677665[09]|4677만6650|4677만6649|비공개 아이템|장갑/)
       expect(body.allowed_mentions).toEqual({ parse: [], users: [] })
     }
@@ -192,8 +430,13 @@ describe('private thread splits', () => {
   }
   async function submit(fail = '', network = false, status = 403, threadBody?: string) {
     const calls = mockRest(fail, network, status, threadBody)
-    const response = await json(privateInput(), true)
-    expect(response).toEqual({ type: 5, data: { flags: 64 } })
+    const preview = await json(privateInput(), true)
+    expect(preview).toMatchObject({ type: 4, data: { flags: 64 } })
+    expect(calls).toHaveLength(0)
+    const id = preview.data.components[0].components[0].custom_id.split(';')[1]
+    const response = await json({ ...privateInput(), ...component('confirm-split', id),
+      member: privateInput().member, channel: privateInput().channel, app_permissions: permissions }, true)
+    expect(response).toEqual({ type: 6 })
     await Promise.all(background)
     expectPrivateFailure(calls)
     return calls
@@ -301,7 +544,10 @@ describe('private thread splits', () => {
     if (field !== 'app_permissions') delete payload.channel
     if (field !== 'channel') delete payload.app_permissions
     const calls = mockRest('/threads')
-    expect(await json(payload, true)).toEqual({ type: 5, data: { flags: 64 } })
+    const preview = await json(payload, true)
+    expect(preview).toMatchObject({ type: 4, data: { flags: 64 } })
+    const id = preview.data.components[0].components[0].custom_id.split(';')[1]
+    expect(await json(component('confirm-split', id), true)).toEqual({ type: 6 })
     await Promise.all(background)
     expect(calls[0].url).toContain('/threads')
     expectPrivateFailure(calls)
@@ -366,7 +612,7 @@ describe('private thread splits', () => {
     await Promise.all(background)
     expect(calls[0].url).toContain(`/channels/${thread}/messages`)
     expect(calls[0].body.allowed_mentions).toEqual({ parse: [], users: [] })
-    expect(calls[1].body).not.toHaveProperty('embeds')
+    expect(calls[1].body.embeds).toEqual([])
     expect(calls[1].body.content).toContain(failure ? '다시 올리지 못했어요' : `<#${thread}>`)
     expectPrivateFailure(calls)
     const noToken = await json(repost(id))
@@ -458,7 +704,9 @@ describe('private thread splits', () => {
     payload.member.nick = '가'.repeat(120)
     Object.assign(payload.data.resolved.members[first], { permissions: '1024' })
     const calls = mockRest()
-    await json(payload, true)
+    const preview = await json(payload, true)
+    const id = preview.data.components[0].components[0].custom_id.split(';')[1]
+    await json({ ...component('confirm-split', id), member: payload.member }, true)
     await Promise.all(background)
     expect(calls[0].body.name.length).toBe(100)
     expect(await count()).toBe(1)
@@ -467,7 +715,8 @@ describe('private thread splits', () => {
     const payload = privateInput()
     payload.data.components[2].component.values!.push(second)
     const creation = mockRest()
-    await json(payload, true)
+    const preview = await json(payload, true)
+    await json(component('confirm-split', preview.data.components[0].components[0].custom_id.split(';')[1]), true)
     await Promise.all(background)
     expect(creation.filter((c) => c.method === 'PUT')).toHaveLength(3)
     const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
@@ -621,7 +870,7 @@ describe('expired splits', () => {
     const other = await create()
     await db.prepare('UPDATE splits SET guild_id = ? WHERE id = ?').bind('other', other).run()
     await db.prepare('UPDATE splits SET created_at = ? WHERE id IN (?, ?)').bind(now, recent, other).run()
-    expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 3, splits: 3 })
+    expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 3, splits: 3, drafts: 0 })
     for (const id of expired) {
       expect(await getSplit(db, id, 'guild')).toBeNull()
       await ephemeral(component('cancel', id), '분배를 찾을 수 없어요.')
@@ -629,7 +878,7 @@ describe('expired splits', () => {
     for (const id of [boundary, recent]) expect(await getSplit(db, id, 'guild')).not.toBeNull()
     expect(await getSplit(db, other, 'other')).not.toBeNull()
     expect(await db.prepare('SELECT COUNT(*) AS n FROM split_members').first('n')).toBe(3)
-    expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 0, splits: 0 })
+    expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 0, splits: 0, drafts: 0 })
   })
   it('rolls back member deletion when the second purge statement fails', async () => {
     const id = await create()
@@ -666,7 +915,7 @@ describe('expired splits', () => {
       }
     }
     await scheduled(db)
-    expect(info.mock.calls).toEqual([['retention purge', { members: 1, splits: 1 }]])
+    expect(info.mock.calls).toEqual([['retention purge', { members: 1, splits: 1, drafts: 0 }]])
     expect(await getSplit(db, id, 'guild')).toBeNull()
     const failure = new TypeError('D1 failure fake-bot-token DISCORD_TOKEN https://private.invalid/secret')
     const broken = { prepare() { throw failure } } as unknown as D1Database
@@ -770,7 +1019,7 @@ describe('creation and validation against local D1', () => {
       payload.data.components[2].component.values!.push(id)
       payload.data.resolved.users[id] = { id, username: `파티원${i}` }
     }
-    const result = await json(payload)
+    const result = await confirmed(payload)
     const id = result.data.components[0].components[0].custom_id.split(';')[1]
     await redraw(await percentModal(id, percentAnswers(percentages, (await getSplit(db, id, 'guild'))!.members)))
     const stored = (await getSplit(db, id, 'guild'))!
@@ -788,7 +1037,7 @@ describe('creation and validation against local D1', () => {
     expect(stored.members.map((m) => [m.user_id, m.display_name, m.position])).toEqual([[first, '첫 닉네임', 0], [second, '둘째', 1]])
     const payload = command()
     delete (payload.data.resolved.members[first] as { nick?: string }).nick
-    const response = await json(payload)
+    const response = await confirmed(payload)
     expect(response.data.components[1].components[0].label).toContain('첫 글로벌')
   })
   it('excludes 0% members from mentions, buttons and completion', async () => {
@@ -814,7 +1063,7 @@ describe('creation and validation against local D1', () => {
   })
   it.each([
     { 총판매금액: 0 }, { 총판매금액: -1 }, { 총판매금액: 1.5 }, { 총판매금액: Number.MAX_SAFE_INTEGER + 1 },
-    { 총판매금액: '2,4,0' }, { 총판매금액: '문자' }, { 수수료: 4 }, { 수수료: undefined },
+    { 총판매금액: ',,,' }, { 총판매금액: '문자' }, { 수수료: 4 }, { 수수료: undefined },
     { 파티원2: first }, { 파티원1: distributor }, { 총판매금액: 1 },
   ])('rejects invalid input %j without writing', async (changes) => {
     await ephemeral(command('분배', { ...defaults, ...changes }))
@@ -859,7 +1108,7 @@ describe('split and percentage modals', () => {
     const response = await json(payload)
     expect(response).toEqual({ type: 9, data: { custom_id: 'split', title: '분배', components: [
       { type: 18, label: '총판매금액', description: '수수료를 빼기 전 금액', component: {
-        type: 4, style: 1, custom_id: 'total', required: true, max_length: 21, placeholder: '240000000',
+        type: 4, style: 1, custom_id: 'total', required: true, max_length: 21,
       } },
       { type: 18, label: '수수료', component: { type: 21, custom_id: 'fee', required: true,
         options: [{ label: '3%', value: '3' }, { label: '5%', value: '5' }] } },
@@ -918,7 +1167,7 @@ describe('split and percentage modals', () => {
       payload.data.components[2].component.values.push(id)
       payload.data.resolved.users[id] = { id, username: '가'.repeat(50) }
     }
-    const created = await json(payload)
+    const created = await confirmed(payload)
     const id = created.data.components[0].components[0].custom_id.split(';')[1]
     const values = { distributor: '12.5', '1000': '12.5', '1001': '0' }
     await redraw(await percentModal(id, values))
@@ -942,7 +1191,7 @@ describe('split and percentage modals', () => {
     const ids = ['1000', '1001', '1002', '1003', '1004']
     payload.data.components[2].component.values = ids
     for (const id of ids) payload.data.resolved.users[id] = { id, username: id }
-    const created = await json(payload)
+    const created = await confirmed(payload)
     const id = created.data.components[0].components[0].custom_id.split(';')[1]
     const before = (await getSplit(db, id, 'guild'))!
     const blank = await percentModal(id)
@@ -1332,7 +1581,7 @@ describe('buttons, concurrency and queries', () => {
     expect(response.embeds[0].description).not.toContain(`<t:${Date.parse('2026-10-01T00:00:00Z') / 1000}:d>`)
     const payload = command()
     payload.data.resolved.members[first].nick = '가'.repeat(100)
-    const result = await json(payload)
+    const result = await confirmed(payload)
     expect(Array.from(result.data.components[1].components[0].label)).toHaveLength(80)
   })
 })
