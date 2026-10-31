@@ -46,11 +46,13 @@ GitHub ruleset이 force push, 브랜치 삭제, merge commit을 막는다. CI는
 
 1. 작업 브랜치에서 `npm version <major|minor|patch> --no-git-tag-version`으로 버전을 올리고 커밋한다.
 2. 3절 순서로 `main`에 합친다.
-3. `main`에서 새 D1 마이그레이션이 있으면 `npx wrangler d1 migrations apply ricemonkey-bot --remote`로 적용한다.
-4. `npm run deploy`로 Worker를 배포한다.
-5. 명령 정의가 바뀌었으면 `npm run register:global`로 전역 등록한다. 새 명령 입력을 옛 Worker가 거부하거나 잘못 해석하지 않도록 코드 배포 뒤에 해야 한다.
-6. 배포한 버전 커밋에 `git tag v<버전>`을 붙인다.
-7. `git push origin main`과 `git push origin v<버전>`으로 올린다.
+3. `git switch main`과 `git pull --ff-only`로 로컬 `main`을 갱신한다. 3절의 `git push origin HEAD:main`은 로컬 `main`을 움직이지 않는다. 배포 전에 `package.json` 버전이 릴리스할 번호인지 확인한다.
+4. 새 D1 마이그레이션이 있으면 `npx wrangler d1 migrations apply ricemonkey-bot --remote`로 적용한다.
+5. `npm run deploy`로 Worker를 배포한다.
+6. 명령 정의가 바뀌었으면 `npm run register:global`로 전역 등록한다. 새 명령 입력을 옛 Worker가 거부하거나 잘못 해석하지 않도록 코드 배포 뒤에 해야 한다.
+7. 배포한 버전 커밋에 `git tag v<버전>`을 붙인다.
+8. `git push origin v<버전>`으로 태그만 올린다.
+9. 실제 배포·등록 결과와 미확인 항목을 `docs/todo.md`와 README의 배포 상태에 갱신한다. 문서 변경도 별도 작업 브랜치에서 커밋하고 3절 순서로 합친다. 소유자의 확인 기록과 확인된 것으로 간주한 결정은 구분해 유지한다.
 
 명령 등록은 반드시 대상을 고른다. `npm run register:global`은 `DISCORD_GUILD_ID`를 무시한다. `npm run register:guild`는 테스트 서버 ID가 있어야 하며 전역 전용 필드를 뺀다. 서버 지정 등록을 하면 전역 명령과 겹쳐 보일 수 있다. 2026-10-31 Discord 조회로 전역 3개 등록과 테스트 서버 명령이 비어 있음을 확인한 상태다.
 
@@ -58,12 +60,13 @@ GitHub ruleset이 force push, 브랜치 삭제, merge commit을 막는다. CI는
 
 ## 8. 배포 후 문제가 생겼을 때
 - 급하면 `npx wrangler rollback`으로 코드부터 복구한다. DB는 되돌아가지 않는다.
+- cron 핸들러가 없는 0.4.0 이전 버전으로 rollback하면 예약 호출이 오류를 내고 자동 삭제가 멈출 수 있다. 이는 추정이다. [Cron Triggers 공식 문서](https://developers.cloudflare.com/workers/configuration/cron-triggers/)는 scheduled 핸들러가 필요하다고 설명하지만, [rollback 문서](https://developers.cloudflare.com/workers/configuration/versions-and-deployments/rollbacks/)에서 cron 설정과 rollback의 관계는 확인하지 못했다. 복구 후 예약 설정과 Cron 이벤트·Workers Logs의 성공 여부를 확인하고, 필요하면 cron 핸들러를 포함한 수정 버전을 배포한다.
 - 그다음 문제 커밋을 `git revert`하고 다음 번호로 릴리스한다. 되돌리지 않으면 다음 배포에서 문제가 다시 나온다.
 - DB 구조를 바꾼 릴리스는 되돌리지 않고, 새 구조를 읽도록 고친 수정 릴리스를 낸다.
 - Worker 버전과 명령 정의가 어긋나면 먼저 배포된 Worker 버전과 해당 커밋을 확인하고, 다음으로 전역·테스트 서버 명령의 실제 등록 범위를 조회한다. 마지막으로 그 커밋의 `src/commands.ts`와 입력 핸들러를 비교한다. Worker 배포를 먼저 맞춘 뒤 필요한 범위만 재등록하며, 전역/서버 중복과 Discord 반영 지연도 구분한다.
 
 ## 9. 운영자 삭제 요청 처리
-이 절은 운영 절차이며 로컬 검사나 개발 중에는 실행하지 않는다. 공개 이슈에 사용자 ID·서버 ID 외 정보가 적혔다면 더 공개하도록 요구하지 않는다. 요청 대상과 처리 범위를 확인한 뒤, 해당 서버에서 요청자가 분배자 또는 파티원(제외자 포함)으로 참여한 분배 전체를 삭제한다. 같은 분배의 다른 참여자 기록도 함께 지워짐을 안내한다.
+이 절은 운영 절차이며 로컬 검사나 개발 중에는 실행하지 않는다. 공개 이슈에 사용자 ID·서버 ID 외 정보가 적혔다면 더 공개하도록 요구하지 않는다. 운영자가 이슈에서 확인 방법을 안내하여 해당 Discord 계정 본인이나 해당 서버 관리자임을 확인한다. 확인하지 못하면 삭제하지 않는다. 요청 대상과 처리 범위를 확인한 뒤, 해당 서버에서 삭제 대상 사용자가 분배자 또는 파티원(제외자 포함)으로 참여한 분배 전체를 삭제한다. 같은 분배의 다른 참여자 기록도 함께 지워짐을 안내한다.
 
 1. 아래 SQL의 `SERVER_ID`, `USER_ID`를 요청 범위로 바꾼다. 입력이 Discord 숫자 ID인지 확인하고 SQL에 임의 문자열을 붙이지 않는다.
 2. `npx wrangler d1 execute ricemonkey-bot --remote --command "<SQL>"`로 먼저 대상 분배와 멤버 건수를 확인한다. 불필요한 사용자 정보는 조회하지 않는다.
@@ -89,4 +92,13 @@ DELETE FROM split_members WHERE split_id IN (
 DELETE FROM splits WHERE guild_id = 'SERVER_ID' AND id IN ('SPLIT_ID');
 ```
 
-4. 멤버 행을 먼저, 분배 행을 나중에 `wrangler d1 execute --remote`로 실행한다. 실패하면 원인을 확인하고 고정한 목록으로 남은 삭제를 처리한다. 같은 건수 확인을 다시 실행해 0건인지 확인한다. Discord 카드는 별도 삭제가 필요하고 D1 복구 기록에는 [개인정보 안내](privacy.md)의 기간 동안 남을 수 있음을 안내한다.
+4. 멤버 행을 먼저, 분배 행을 나중에 `wrangler d1 execute --remote`로 실행한다. 실패하면 원인을 확인하고 고정한 목록으로 남은 삭제를 처리한다. 참여 조건으로 다시 찾으면 멤버 삭제만 성공했어도 거짓 0건이 될 수 있다. 아래 `SPLIT_ID`를 3번에서 고정한 전체 ID 목록으로 바꾸어 `splits`와 `split_members`를 각각 세고 둘 다 0건인지 확인한다. 멤버 확인은 부모 행이 이미 지워진 경우도 잡도록 부모 조회에 의존하지 않는다.
+
+```sql
+SELECT COUNT(*) AS splits FROM splits
+WHERE guild_id = 'SERVER_ID' AND id IN ('SPLIT_ID');
+SELECT COUNT(*) AS members FROM split_members
+WHERE split_id IN ('SPLIT_ID');
+```
+
+Discord 카드는 별도 삭제가 필요하고 D1 복구 기록에는 [개인정보 안내](privacy.md)의 기간 동안 남을 수 있음을 안내한다.
