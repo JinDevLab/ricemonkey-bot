@@ -11,7 +11,7 @@ import { adjustPercent, buildSplit as buildModalSplit } from '../src/input'
 import type { APIModalSubmitInteraction } from 'discord-api-types/v10'
 import { parsePercent, splitErrorMessages } from '../src/input'
 import { commands, registrationCommands } from '../src/commands'
-import { escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from '../src/render'
+import { cardShowsMember, escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from '../src/render'
 
 const keys = generateKeyPairSync('ed25519')
 const publicKey = Buffer.from(keys.publicKey.export({ format: 'jwk' }).x!, 'base64url').toString('hex')
@@ -110,6 +110,7 @@ async function percentModal(id: string, values: Record<string, unknown> = {}, us
   const open = await json(component('percent', id.split(';')[0]))
   const payload = submitModal(open, values, user)
   payload.data.custom_id = `percent;${id}`
+  Object.assign(payload.message, { embeds: renderSplit((await getSplit(db, id.split(';')[0], 'guild'))!).embeds })
   return payload
 }
 function percentAnswers(options: Options, members: { user_id: string }[]) {
@@ -173,8 +174,25 @@ describe('percentage notification recovery', () => {
     expect((await json(same, true)).type).toBe(7)
     expect(calls).toHaveLength(2)
     // Missing descriptions fall back to the DB comparison, rather than notifying everyone.
-    expect((await json(await percentModal(id), true)).type).toBe(7)
+    const missing = await percentModal(id)
+    delete (missing.message as { embeds?: unknown }).embeds
+    expect((await json(missing, true)).type).toBe(7)
     expect(calls).toHaveLength(2)
+  })
+})
+
+describe('card member comparison', () => {
+  it.each([
+    [`<@22> · 대기\n경매장 등록가: ${listingMoney(100)}`, '2', 100, false],
+    [`<@2> · 대기\n경매장 등록가: ${listingMoney(100)}\n\n<@22> · 대기\n경매장 등록가: ${listingMoney(1000)}`, '2', 100, true],
+    [`<@2> · 대기\n경매장 등록가: ${listingMoney(1000)}`, '2', 100, false],
+    [`<@2> · 대기\n경매장 등록가: ${listingMoney(100)}`, '2', 1000, false],
+    [`<@2> · 대기\n경매장 등록가: ${listingMoney(1000)}\n실수령액: ${money(100)}`, '2', 100, false],
+    [`분배자 <@2>\n실수령액: ${money(100)}`, '2', 100, false],
+    [`<@22> · 대기\n경매장 등록가: ${listingMoney(100)}`, '2', 0, true],
+    [`<@2> · 대기\n경매장 등록가: ${listingMoney(100)}`, '2', 0, false],
+  ] as const)('matches the exact member and listing amount: %j', (description, user_id, listing_amount, expected) => {
+    expect(cardShowsMember(description, { user_id, listing_amount })).toBe(expected)
   })
 })
 
