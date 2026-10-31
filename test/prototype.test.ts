@@ -285,7 +285,7 @@ describe('command definitions and percent parser', () => {
   })
   it('reports registration HTTP errors without printing the request token', () => {
     const script = `process.env.DISCORD_APPLICATION_ID='test-app'; process.env.DISCORD_TOKEN='private-register-token';
-      process.env.DISCORD_GUILD_ID='test-guild';
+      process.env.DISCORD_GUILD_ID='test-guild'; process.argv[2]='guild';
       globalThis.fetch=async (_url, init)=>{
         const commands=JSON.parse(init.body);
         if(commands.some(c=>'contexts' in c || 'integration_types' in c)) throw Error('global-only fields');
@@ -297,6 +297,33 @@ describe('command definitions and percent parser', () => {
     expect(result.stderr).toContain('50035: invalid')
     expect(result.stderr).toContain('name: bad name')
     expect(result.stderr).not.toContain('private-register-token')
+  })
+  it.each([undefined, 'invalid', 'guild'])('rejects missing configuration for mode %s without API calls', (mode) => {
+    const script = `process.argv[2]=${JSON.stringify(mode) ?? 'undefined'};
+      process.env.DISCORD_APPLICATION_ID='test-app'; process.env.DISCORD_TOKEN='private-register-token';
+      delete process.env.DISCORD_GUILD_ID;
+      globalThis.fetch=async ()=>{console.error('API_CALLED'); throw Error('unexpected')};
+      await import('./scripts/register.ts');`
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8' })
+    expect(result.status).toBe(1)
+    expect(result.stderr).not.toContain('API_CALLED')
+    expect(result.stderr).not.toContain('private-register-token')
+  })
+  it.each(['global', 'guild'])('explicitly registers %s commands with target-specific fields', (mode) => {
+    const script = `process.argv[2]='${mode}'; process.env.DISCORD_APPLICATION_ID='test-app';
+      process.env.DISCORD_TOKEN='private-register-token'; process.env.DISCORD_GUILD_ID='private-guild-id';
+      globalThis.fetch=async (url,init)=>{
+        if(String(url).includes('/guilds/')!==${mode === 'guild'}) throw Error('wrong path');
+        const commands=JSON.parse(init.body);
+        if(commands.some(c=>('contexts' in c && 'integration_types' in c)!==${mode === 'global'})) throw Error('wrong fields');
+        console.info('API_CHECKED'); return new Response('[]');
+      }; await import('./scripts/register.ts');`
+    const result = spawnSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8' })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('API_CHECKED')
+    expect(result.stdout).toContain(mode === 'global' ? '전역' : '테스트 서버')
+    expect(result.stdout + result.stderr).not.toContain('private-register-token')
+    expect(result.stdout + result.stderr).not.toContain('private-guild-id')
   })
   it('uses valid Korean names and guild-only registration', () => {
     const regex = /^[-_ʼ\p{L}\p{N}\p{sc=Deva}\p{sc=Thai}]{1,32}$/u
