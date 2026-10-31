@@ -121,7 +121,7 @@ app.component('percent', guarded<ComponentContext<Env>>(async (c) => {
       ...(field.percent !== null ? { value: String(field.percent / 100) } : {}) },
   }))
   return c.resModal({ custom_id: `percent;${stored.split.id}`,
-    title: stored.members.length === 5 ? '비율 조정 (분배자는 남은 몫)' : '비율 조정', components })
+    title: stored.members.length === 5 ? '비율 조정 (분배자는 빈 칸처럼 계산)' : '비율 조정', components })
 }))
 
 app.modal('percent', guarded<ModalContext<Env>>(async (c) => {

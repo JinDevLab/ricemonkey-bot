@@ -98,11 +98,19 @@ function buildSplit(payload: APIModalSubmitInteraction) {
     'value' in row.component ? row.component.value : row.component.values]))
   return buildModalSplit(payload, { total: values.total, fee: values.fee, members: values.members })
 }
-function percentModal(id: string, values: Record<string, unknown> = {}, user = distributor) {
+function submitModal(open: any, values: Record<string, unknown> = {}, user = distributor) {
+  let id = 1
   return { ...command('unused', {}, user), type: 5, message: { id: 'message' },
-    data: { custom_id: `percent;${id}`, components: Object.entries(values).map(([custom_id, value]) => ({
-      type: 18, component: { type: 4, custom_id, value },
+    data: { custom_id: open.data.custom_id, components: open.data.components.map((label: any) => ({
+      type: 18, id: id++, component: { type: label.component.type, id: id++, custom_id: label.component.custom_id,
+        value: values[label.component.custom_id] ?? label.component.value ?? '' },
     })) } }
+}
+async function percentModal(id: string, values: Record<string, unknown> = {}, user = distributor) {
+  const open = await json(component('percent', id.split(';')[0]))
+  const payload = submitModal(open, values, user)
+  payload.data.custom_id = `percent;${id}`
+  return payload
 }
 function percentValues(options: Options, members: { user_id: string }[]) {
   return Object.fromEntries([
@@ -117,7 +125,7 @@ async function create(options?: Options) {
   const id = response.data.components[0].components[0].custom_id.split(';')[1] as string
   if (options && Object.keys(options).some((key) => key.includes('퍼센트'))) {
     const stored = (await getSplit(db, id, 'guild'))!
-    await redraw(percentModal(id, percentValues(options, stored.members)))
+    await redraw(await percentModal(id, percentValues(options, stored.members)))
   }
   return id
 }
@@ -200,7 +208,7 @@ describe('creation and validation against local D1', () => {
     }
     const result = await json(payload)
     const id = result.data.components[0].components[0].custom_id.split(';')[1]
-    await redraw(percentModal(id, percentValues(percentages, (await getSplit(db, id, 'guild'))!.members)))
+    await redraw(await percentModal(id, percentValues(percentages, (await getSplit(db, id, 'guild'))!.members)))
     const stored = (await getSplit(db, id, 'guild'))!
     expect(stored.split.net_sale).toBe(net)
     expect(stored.split.distributor_final).toBe(final)
@@ -349,10 +357,10 @@ describe('split and percentage modals', () => {
     const created = await json(payload)
     const id = created.data.components[0].components[0].custom_id.split(';')[1]
     const values = { distributor: '12.5', '1000': '12.5', '1001': '0' }
-    await redraw(percentModal(id, values))
+    await redraw(await percentModal(id, values))
     const open = await json(component('percent', id))
     expect(open.type).toBe(9)
-    expect(open.data.title).toBe(count === 5 ? '비율 조정 (분배자는 남은 몫)' : '비율 조정')
+    expect(open.data.title).toBe(count === 5 ? '비율 조정 (분배자는 빈 칸처럼 계산)' : '비율 조정')
     expect(open.data.components).toHaveLength(5)
     const fields = open.data.components
     expect(fields.some((f: any) => f.component.custom_id === 'distributor')).toBe(count === 4)
@@ -365,16 +373,50 @@ describe('split and percentage modals', () => {
     expect(fields.find((f: any) => f.component.custom_id === '1001').component.value).toBe('0')
     if (count === 5) expect((await getSplit(db, id, 'guild'))!.split.distributor_percent_hundredths).toBeNull()
   })
+  it('round-trips five shown member fields including blanks, prefill and a zero distributor', async () => {
+    const payload = command()
+    const ids = ['1000', '1001', '1002', '1003', '1004']
+    payload.data.components[2].component.values = ids
+    for (const id of ids) payload.data.resolved.users[id] = { id, username: id }
+    const created = await json(payload)
+    const id = created.data.components[0].components[0].custom_id.split(';')[1]
+    const before = (await getSplit(db, id, 'guild'))!
+    const blank = await percentModal(id)
+    expect(blank.data.components.map((label: any) => label.component.value)).toEqual(Array(5).fill(''))
+    expect(blank.data.components.some((label: any) => label.component.custom_id === 'distributor')).toBe(false)
+    await redraw(blank)
+    expect(await getSplit(db, id, 'guild')).toEqual(before)
+    await ephemeral(await percentModal(id, Object.fromEntries(ids.map((key) => [key, '21']))), splitErrorMessages.PERCENT_SUM)
+    expect(await getSplit(db, id, 'guild')).toEqual(before)
+    await redraw(await percentModal(id, { '1000': ' 30 ' }))
+    const partial = (await getSplit(db, id, 'guild'))!
+    expect(partial.split.distributor_percent_hundredths).toBeNull()
+    expect(partial.members.map((m) => m.percent_hundredths)).toEqual([3000, null, null, null, null])
+    expect(renderSplit(partial).embeds![0].description).toContain(`분배자 <@${distributor}> · 14%`)
+    await ephemeral(await percentModal(id, { '1000': '50 %' }), splitErrorMessages.INVALID_PERCENT)
+    expect(await getSplit(db, id, 'guild')).toEqual(partial)
+    await redraw(await percentModal(id, Object.fromEntries(ids.map((key) => [key, '20']))))
+    const full = (await getSplit(db, id, 'guild'))!
+    expect(full.split).toMatchObject({ distributor_percent_hundredths: 0, distributor_final: 0 })
+    expect(full.members.every((m) => m.percent_hundredths === 2000)).toBe(true)
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const unchanged = await percentModal(id)
+    expect(unchanged.data.components.map((label: any) => label.component.value)).toEqual(Array(5).fill('20'))
+    await json(unchanged, true)
+    expect(await getSplit(db, id, 'guild')).toEqual(full)
+    expect(fetch).not.toHaveBeenCalled()
+  })
   it('recalculates, excludes zero shares and restores excluded members with whitespace blanks', async () => {
     const id = await create({ ...defaults, 파티원2: second })
     const before = (await getSplit(db, id, 'guild'))!
-    const response = await redraw(percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }))
+    const response = await redraw(await percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }))
     expect(response.allowed_mentions?.users).toEqual([first])
     const adjusted = (await getSplit(db, id, 'guild'))!
     expect(adjusted.split).toMatchObject({ total_sale: before.split.total_sale, net_sale: before.split.net_sale,
       sale_fee_percent: before.split.sale_fee_percent, distributor_percent_hundredths: 6000 })
     expect(adjusted.members[1]).toMatchObject({ percent_hundredths: 0, listing_amount: 0, status: 'excluded' })
-    await redraw(percentModal(id, { distributor: '  ', [first]: '', [second]: '\t' }))
+    await redraw(await percentModal(id, { distributor: '  ', [first]: '', [second]: '\t' }))
     const restored = (await getSplit(db, id, 'guild'))!
     expect(restored.members.every((m) => m.status === 'pending' && m.percent_hundredths === null)).toBe(true)
     expect(restored.split.distributor_final).toBe(before.split.distributor_final)
@@ -386,22 +428,23 @@ describe('split and percentage modals', () => {
   ])('rejects percentage errors without touching the card or DB %j', async (values) => {
     const id = await create()
     const before = await getSplit(db, id, 'guild')
-    await ephemeral(percentModal(id, values))
+    await ephemeral(await percentModal(id, values))
     expect(await getSplit(db, id, 'guild')).toEqual(before)
   })
   it('rechecks message origin and authorization on percentage submission', async () => {
     const id = await create()
-    await ephemeral(percentModal(id, {}, first), '분배자만 이 버튼을 누를 수 있어요.')
-    const payload = percentModal(id)
+    await ephemeral(await percentModal(id, {}, first), '분배자만 이 버튼을 누를 수 있어요.')
+    const payload = await percentModal(id)
     delete (payload as { message?: unknown }).message
     await ephemeral(payload, '안내 메시지의 비율 조정 버튼을 다시 눌러 주세요.')
-    await ephemeral(percentModal(`${id};extra`))
+    await ephemeral(await percentModal(`${id};extra`))
+    const stale = await percentModal(id)
     await cancelSplit(db, id, 'guild', distributor)
-    await redraw(percentModal(id))
+    await redraw(stale)
   })
   it.each(['uploaded', 'purchased', 'canceled', 'distributor', 'guild'] as const)('protects every DB row against stale %s saves', async (state) => {
     const id = await create({ ...defaults, 파티원2: second })
-    await json(component('percent', id))
+    const stale = await percentModal(id, { distributor: '60' })
     const adjusted = adjustPercent((await getSplit(db, id, 'guild'))!, { distributor: '60', [first]: '40', [second]: '0' })
     if (state === 'uploaded' || state === 'purchased') {
       await markUploaded(db, id, 'guild', first, '옛 금액 아이템')
@@ -410,7 +453,7 @@ describe('split and percentage modals', () => {
     const before = await getSplit(db, id, 'guild')
     expect(await databaseModule.savePercent(db, adjusted, state === 'guild' ? 'other' : 'guild', state === 'distributor' ? first : distributor)).toBe(false)
     expect(await getSplit(db, id, 'guild')).toEqual(before)
-    if (state === 'uploaded' || state === 'purchased') await ephemeral(percentModal(id, { distributor: '60' }))
+    if (state === 'uploaded' || state === 'purchased') await ephemeral(stale)
     expect(await getSplit(db, id, 'guild')).toEqual(before)
   })
   it('rejects a registration between handler read and batch save without partial writes', async () => {
@@ -421,27 +464,27 @@ describe('split and percentage modals', () => {
       return save(...args)
     })
     const before = (await getSplit(db, id, 'guild'))!
-    await ephemeral(percentModal(id, { distributor: '60' }), '이미 경매장 등록을 한 파티원이 있어서 비율을 바꿀 수 없어요.')
+    await ephemeral(await percentModal(id, { distributor: '60' }), '이미 경매장 등록을 한 파티원이 있어서 비율을 바꿀 수 없어요.')
     const latest = (await getSplit(db, id, 'guild'))!
     expect(latest.split).toEqual(before.split)
     expect(latest.members[0]).toMatchObject({ percent_hundredths: null, listing_amount: before.members[0].listing_amount, status: 'uploaded' })
   })
   it('notifies all and only members whose listing amount changed, after updating the card', async () => {
     const id = await create({ ...defaults, 파티원2: second })
-    await redraw(percentModal(id, { distributor: '50', [first]: '50', [second]: '0' }))
+    await redraw(await percentModal(id, { distributor: '50', [first]: '50', [second]: '0' }))
     const calls: any[] = []
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
       calls.push(JSON.parse(init.body as string)); return new Response('{}')
     }))
-    expect((await request(percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }), true)).status).toBe(202)
+    expect((await request(await percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }), true)).status).toBe(202)
     await Promise.all(background)
     expect(calls).toHaveLength(2)
     expect(calls[0].type).toBe(7)
     expect(calls[1]).toEqual({ content: `<@${first}> <@${distributor}>님이 비율을 바꿨어요. 경매장 등록가를 다시 확인해 주세요.`,
       allowed_mentions: { parse: [], users: [first] } })
-    await redraw(percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }))
+    await redraw(await percentModal(id, { distributor: '60', [first]: '40', [second]: '0' }))
     expect(calls).toHaveLength(2)
-    expect((await request(percentModal(id), true)).status).toBe(202)
+    expect((await request(await percentModal(id, { distributor: '', [first]: '', [second]: '' }), true)).status).toBe(202)
     await Promise.all(background)
     expect(calls[3].allowed_mentions.users).toEqual([first, second])
     expect(calls[3].content).toBe(`<@${first}> <@${second}> <@${distributor}>님이 비율을 바꿨어요. 경매장 등록가를 다시 확인해 주세요.`)
@@ -451,7 +494,7 @@ describe('split and percentage modals', () => {
     const calls = vi.fn()
     vi.stubGlobal('fetch', calls)
     const before = (await getSplit(db, id, 'guild'))!
-    expect((await json(percentModal(id, { distributor: '50', [first]: '50' }), true)).type).toBe(7)
+    expect((await json(await percentModal(id, { distributor: '50', [first]: '50' }), true)).type).toBe(7)
     expect(calls).not.toHaveBeenCalled()
     expect((await getSplit(db, id, 'guild'))!.members[0].listing_amount).toBe(before.members[0].listing_amount)
   })
@@ -873,7 +916,7 @@ describe('item registration and embed cards', () => {
       const id = await create()
       const payload = await modal(id)
       if (kind === 'stale') {
-        await redraw(percentModal(id, { distributor: '60', [first]: '40' }))
+        await redraw(await percentModal(id, { distributor: '60', [first]: '40' }))
       } else {
         payload.data.custom_id = { legacy: `item;${id}`, forged: `item;${id};1`, extra: `item;${id};1;2`,
           negative: `item;${id};-1`, decimal: `item;${id};1.0` }[kind]!

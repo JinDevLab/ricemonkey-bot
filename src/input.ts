@@ -42,10 +42,13 @@ function checkedSplit(input: SplitInput) {
 export function adjustPercent(stored: StoredSplit, values: Record<string, unknown>): StoredSplit {
   const percent = (key: string) => {
     const raw = values[key]
-    return parsePercent(typeof raw === 'string' && !raw.trim() ? undefined : raw)
+    return parsePercent(typeof raw === 'string' ? raw.trim() || undefined : raw)
   }
-  const distributorPercent = stored.members.length === 5 ? undefined : percent('distributor')
   const members = stored.members.map((m) => ({ id: m.user_id, percentHundredths: percent(m.user_id) }))
+  const distributorPercent = stored.members.length === 5
+    ? members.every((m) => m.percentHundredths !== undefined)
+      && members.reduce((sum, m) => sum + m.percentHundredths!, 0) === 10000 ? 0 : undefined
+    : percent('distributor')
   const result = checkedSplit({ totalSale: BigInt(stored.split.total_sale), saleFeePercent: stored.split.sale_fee_percent,
     distributor: { id: stored.split.distributor_id, percentHundredths: distributorPercent }, members })
   return {
