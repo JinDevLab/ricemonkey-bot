@@ -176,8 +176,8 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
     let changed = false
     if (action === 'uploaded') {
       if (member!.status === 'purchased') return c.update().res(renderSplit(stored))
-      return c.resModal({ custom_id: `item;${id}`, title: '경매장 등록', components: [{
-        type: 18, label: '등록한 아이템', component: { type: 4, custom_id: 'item_name', style: 1,
+      return c.resModal({ custom_id: `item;${id};${member!.listing_amount}`, title: '경매장 등록', components: [{
+        type: 18, label: '등록한 아이템', description: `${money(member!.listing_amount)} (${member!.listing_amount})로 올렸는지 확인해 주세요`, component: { type: 4, custom_id: 'item_name', style: 1,
           required: true, max_length: 100, ...(member!.item_name ? { value: member!.item_name } : {}) },
       }] })
     } else {
@@ -217,8 +217,12 @@ app.modal('item', guarded<ModalContext<Env>>(async (c) => {
   const guild = c.interaction.guild_id
   const user = c.interaction.member?.user.id
   if (!guild || !user) return reject(c, '서버 안에서 사용해 주세요.')
-  const id = c.ref.custom_value
-  if (!id || id.includes(';')) return reject(c, '잘못된 분배 입력창이에요.')
+  const parts = (c.ref.custom_value ?? '').split(';')
+  const [id, rawAmount] = parts
+  if (!id || parts.length !== 2 || !/^\d+$/.test(rawAmount)) {
+    return reject(c, '안내 메시지의 경매장 등록 버튼을 다시 눌러 주세요.')
+  }
+  const amount = Number(rawAmount)
   // Type 7 is only usable for a modal opened from a message component.
   if (!c.interaction.message) return reject(c, '안내 메시지의 경매장 등록 버튼을 다시 눌러 주세요.')
   const db = database(c)
@@ -227,18 +231,25 @@ app.modal('item', guarded<ModalContext<Env>>(async (c) => {
   const member = stored.members.find((m) => m.user_id === user)
   if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
   if (stored.split.status !== 'active' || member.status === 'purchased') return c.update().res(renderSplit(stored))
+  const changedAmount = (value: number) => `분배자가 비율을 바꿔서 경매장 등록가가 ${listingMoney(value)}로 바뀌었어요. 게임에 올린 금액을 확인하고 버튼을 다시 눌러 주세요.`
+  if (member.listing_amount !== amount) return reject(c, changedAmount(member.listing_amount))
   const raw = c.get('item_name')
   const itemName = typeof raw === 'string' ? raw.replace(/[\r\n]+/g, ' ').trim() : ''
   if (!itemName || itemName.length > 100) return reject(c, '등록한 아이템을 1~100자로 입력해 주세요.')
-  const changed = await markUploaded(db, id, guild, user, itemName)
+  const changed = await markUploaded(db, id, guild, user, itemName, amount)
   const latest = await getSplit(db, id, guild)
   if (!latest) throw new Error('Split disappeared')
+  const uploaded = latest.members.find((m) => m.user_id === user)!
+  if (!changed && uploaded.listing_amount !== amount) {
+    return reject(c, uploaded.status === 'excluded'
+      ? '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.' : changedAmount(uploaded.listing_amount))
+  }
   const data = renderSplit(latest)
   if (!changed || !c.env.DISCORD_TOKEN) return c.update().res(data)
   const name = escapeItemName(itemName)
   const text = member.status === 'pending' ? `**${name}** 등록했어요` : `아이템을 **${name}**(으)로 수정했어요`
   return updateWithNotification(c, data, 'uploaded',
-    `<@${stored.split.distributor_id}> <@${user}>님이 ${text} · 경매장 등록가: ${listingMoney(member.listing_amount)}`,
+    `<@${stored.split.distributor_id}> <@${user}>님이 ${text} · 경매장 등록가: ${listingMoney(uploaded.listing_amount)}`,
     [stored.split.distributor_id])
 }))
 

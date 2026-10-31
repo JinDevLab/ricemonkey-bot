@@ -80,11 +80,11 @@ export async function savePercent(db: D1Database, { split, members }: StoredSpli
   return result.meta.changes > 0
 }
 
-export async function markUploaded(db: D1Database, id: string, guild: string, user: string, itemName: string) {
+export async function markUploaded(db: D1Database, id: string, guild: string, user: string, itemName: string, amount: number) {
   const result = await db.prepare(`UPDATE split_members SET status = 'uploaded', item_name = ?, uploaded_at = COALESCE(uploaded_at, ?)
-    WHERE split_id = ? AND user_id = ? AND status IN ('pending', 'uploaded')
+    WHERE split_id = ? AND user_id = ? AND status IN ('pending', 'uploaded') AND listing_amount = ?
     AND EXISTS (SELECT 1 FROM splits WHERE id = ? AND guild_id = ? AND status = 'active')`)
-    .bind(itemName, new Date().toISOString(), id, user, id, guild).run()
+    .bind(itemName, new Date().toISOString(), id, user, amount, id, guild).run()
   return result.meta.changes > 0
 }
 

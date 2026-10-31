@@ -6,7 +6,7 @@ import { URL } from 'node:url'
 import { getPlatformProxy } from 'wrangler'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import app from '../src/index'
-import { cancelSplit, createSplit, getSplit, markPurchased, markUploaded, unfinished } from '../src/db'
+import { cancelSplit, createSplit, getSplit, markPurchased, unfinished } from '../src/db'
 import { adjustPercent, buildSplit as buildModalSplit } from '../src/input'
 import type { APIModalSubmitInteraction } from 'discord-api-types/v10'
 import { parsePercent, splitErrorMessages } from '../src/input'
@@ -71,9 +71,15 @@ function component(action: string, id: string, user = distributor, target?: stri
   return { ...command('unused', {}, user, guild), type: 3, message: { id: 'message' },
     data: { component_type: 2, custom_id: `${action};${id}${target ? `;${target}` : ''}` } }
 }
-function modal(id: string, value = '장갑', user = first, guild = 'guild') {
+async function modal(id: string, value = '장갑', user = first, guild = 'guild') {
+  const stored = await getSplit(db, id, 'guild')
+  const amount = stored?.members.find((m) => m.user_id === user)?.listing_amount ?? 0
   return { ...command('unused', {}, user, guild), type: 5, message: { id: 'message' },
-    data: { custom_id: `item;${id}`, components: [{ type: 18, component: { type: 4, custom_id: 'item_name', value } }] } }
+    data: { custom_id: `item;${id};${amount}`, components: [{ type: 18, component: { type: 4, custom_id: 'item_name', value } }] } }
+}
+async function markUploaded(binding: D1Database, id: string, guild: string, user: string, name: string) {
+  const stored = (await getSplit(db, id, 'guild'))!
+  return databaseModule.markUploaded(binding, id, guild, user, name, stored.members.find((m) => m.user_id === user)!.listing_amount)
 }
 async function request(payload: unknown, token = false, binding: D1Database | null = db) {
   const body = JSON.stringify(payload)
@@ -227,7 +233,7 @@ describe('creation and validation against local D1', () => {
     await ephemeral(component('uploaded', id, second), '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
     await redraw(component('purchased', id, distributor, second))
     expect((await getSplit(db, id, 'guild'))?.members[1].status).toBe('excluded')
-    await json(modal(id))
+    await json(await modal(id))
     const result = await json(component('purchased', id, distributor, first))
     expect(result.data.embeds[0].title).toContain('✅')
     expect(result.data.components).toEqual([])
@@ -321,7 +327,7 @@ describe('split and percentage modals', () => {
     await ephemeral(component('percent', id, first), '분배자만 이 버튼을 누를 수 있어요.')
     await ephemeral(component('percent', `${id};extra`))
     await ephemeral(component('percent', id, distributor, undefined, 'other'))
-    await json(modal(id))
+    await json(await modal(id))
     expect(await hasButton()).toBe(false)
     await ephemeral(component('percent', id), '이미 경매장 등록을 한 파티원이 있어서 비율을 바꿀 수 없어요.')
     await json(component('purchased', id, distributor, first))
@@ -484,8 +490,8 @@ describe('review regressions', () => {
   })
   it('redraws authorized stale clicks but never edits for unauthorized users, even after completion', async () => {
     const id = await create()
-    await json(modal(id))
-    expect(await json(component('uploaded', id, first))).toMatchObject({ type: 9, data: { custom_id: `item;${id}` } })
+    await json(await modal(id))
+    expect(await json(component('uploaded', id, first))).toMatchObject({ type: 9, data: { custom_id: `item;${id};${(await getSplit(db, id, 'guild'))!.members[0].listing_amount}` } })
     await json(component('purchased', id, distributor, first))
     const upload = vi.spyOn(databaseModule, 'markUploaded')
     const purchase = vi.spyOn(databaseModule, 'markPurchased')
@@ -532,8 +538,8 @@ describe('review regressions', () => {
   })
   it('only reacts after the last purchase in a two-member split', async () => {
     const id = await create({ ...defaults, 파티원2: second })
-    await json(modal(id))
-    await json(modal(id, '장갑', second))
+    await json(await modal(id))
+    await json(await modal(id, '장갑', second))
     const fetch = vi.fn(async (_url: string) => new Response('{}'))
     vi.stubGlobal('fetch', fetch)
     expect((await request(component('purchased', id, distributor, first), true)).status).toBe(202)
@@ -566,7 +572,7 @@ describe('buttons, concurrency and queries', () => {
     expect((await getSplit(db, id, 'guild'))?.members[0].status).toBe('pending')
     const opened = await json(component('uploaded', id, first))
     expect(opened.type).toBe(9)
-    const response = await json(modal(id))
+    const response = await json(await modal(id))
     expect(response.type).toBe(7)
     expect(response.data.embeds[0].description).toContain('등록 완료')
     expect(response.data.allowed_mentions.users).toEqual([first])
@@ -580,8 +586,8 @@ describe('buttons, concurrency and queries', () => {
     await ephemeral(component('purchased', id, distributor, first), '파티원이 아직 경매장 등록을 하지 않았어요.')
     expect(await markPurchased(db, id, 'guild', distributor, first)).toEqual({ changed: false, completed: false })
     expect(await getSplit(db, id, 'guild')).toEqual(before)
-    await json(modal(id))
-    await json(modal(id, '장갑', second))
+    await json(await modal(id))
+    await json(await modal(id, '장갑', second))
     expect(renderSplit((await getSplit(db, id, 'guild'))!).components![1]).toMatchObject({ components: [{ disabled: false }, { disabled: false }] })
     const response = await json(component('purchased', id, distributor, first))
     expect(response.type).toBe(7)
@@ -598,7 +604,7 @@ describe('buttons, concurrency and queries', () => {
   })
   it('cancels without deleting or reverting prior purchases', async () => {
     const id = await create({ ...defaults, 파티원2: second })
-    await json(modal(id))
+    await json(await modal(id))
     await json(component('purchased', id, distributor, first))
     const response = await json(component('cancel', id))
     expect(response.data.embeds[0].description).toContain('이미 구매한 건은 봇이 되돌리지 못해요')
@@ -613,8 +619,8 @@ describe('buttons, concurrency and queries', () => {
   })
   it('does not lose changes from concurrent purchases', async () => {
     const id = await create({ ...defaults, 파티원2: second })
-    await json(modal(id))
-    await json(modal(id, '장갑', second))
+    await json(await modal(id))
+    await json(await modal(id, '장갑', second))
     const results = await Promise.all([json(component('purchased', id, distributor, first)), json(component('purchased', id, distributor, second))])
     expect(results.every((r) => r.type === 7)).toBe(true)
     const stored = (await getSplit(db, id, 'guild'))!
@@ -623,14 +629,14 @@ describe('buttons, concurrency and queries', () => {
   })
   it('handles concurrent duplicate uploads and upload/purchase races', async () => {
     const id = await create()
-    const results = await Promise.all([json(modal(id)), json(modal(id))])
+    const results = await Promise.all([json(await modal(id)), json(await modal(id))])
     expect(results.map((r) => r.type)).toEqual([7, 7])
-    await Promise.all([json(modal(id)), json(component('purchased', id, distributor, first))])
+    await Promise.all([json(await modal(id)), json(component('purchased', id, distributor, first))])
     expect((await getSplit(db, id, 'guild'))?.split.status).toBe('completed')
   })
   it('keeps cancel/purchase races terminal and consistent', async () => {
     const id = await create()
-    await json(modal(id))
+    await json(await modal(id))
     await Promise.all([json(component('cancel', id)), json(component('purchased', id, distributor, first))])
     const stored = (await getSplit(db, id, 'guild'))!
     expect(['canceled', 'completed']).toContain(stored.split.status)
@@ -656,7 +662,7 @@ describe('buttons, concurrency and queries', () => {
     expect((await ephemeral(command('내역', {}, first))).embeds[0].description).toContain('4677만6649 메소')
     expect((await ephemeral(command('내역', {}))).embeds[0].description).toContain('4677만6650 메소')
     expect((await ephemeral(command('내역', {}, first, 'other'))).embeds[0].description).toBe('참여한 분배가 없어요.')
-    await json(modal(id))
+    await json(await modal(id))
     expect((await ephemeral(command('미완료', {}, first))).embeds[0].description).toBe('없어요.')
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toContain('등록 완료')
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toContain('**장갑**')
@@ -684,7 +690,7 @@ describe('purchase flow regressions', () => {
   it.each([null, '*장갑* <@123>'])('notifies the member once, after callback, with item %s', async (name) => {
     const id = await create({ 총판매금액: 500000000, 수수료: 3, 파티원1: first, 파티원2: second })
     if (name === null) await db.prepare("UPDATE split_members SET status = 'uploaded' WHERE split_id = ? AND user_id = ?").bind(id, first).run()
-    else await json(modal(id, name))
+    else await json(await modal(id, name))
     const calls: { url: string; body: any }[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
       calls.push({ url, body: JSON.parse(init.body as string) })
@@ -708,7 +714,7 @@ describe('purchase flow regressions', () => {
   })
   it('sends the exact final purchase notification as well as the completion reaction', async () => {
     const id = await create({ 총판매금액: 500000000, 수수료: 3, 파티원1: first })
-    await json(modal(id))
+    await json(await modal(id))
     const calls: { url: string; body: any }[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
       calls.push({ url, body: init.body ? JSON.parse(init.body as string) : null })
@@ -725,7 +731,7 @@ describe('purchase flow regressions', () => {
   })
   it.each(['callback-http', 'callback-network', 'notification-http', 'notification-network'])('preserves purchase without retry on %s failure', async (failure) => {
     const id = await create({ ...defaults, 파티원2: second })
-    await json(modal(id))
+    await json(await modal(id))
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const fetch = vi.fn(async (url: string) => {
       const failing = url.includes('/callback') === failure.startsWith('callback')
@@ -854,13 +860,69 @@ describe('message amount formatting', () => {
 })
 
 describe('item registration and embed cards', () => {
+  it('includes the current listing amount in the modal reference and confirmation', async () => {
+    const id = await create({ ...defaults, 총판매금액: Number.MAX_SAFE_INTEGER })
+    const amount = (await getSplit(db, id, 'guild'))!.members[0].listing_amount
+    const open = await json(component('uploaded', id, first))
+    expect(open.data.custom_id).toBe(`item;${id};${amount}`)
+    expect(open.data.components[0].description).toBe(`${money(amount)} (${amount})로 올렸는지 확인해 주세요`)
+    expect(open.data.components[0].description.length).toBeLessThanOrEqual(100)
+  })
+  it.each(['stale', 'legacy', 'forged', 'extra', 'negative', 'decimal'])(
+    'rejects %s item references without writes or notifications', async (kind) => {
+      const id = await create()
+      const payload = await modal(id)
+      if (kind === 'stale') {
+        await redraw(percentModal(id, { distributor: '60', [first]: '40' }))
+      } else {
+        payload.data.custom_id = { legacy: `item;${id}`, forged: `item;${id};1`, extra: `item;${id};1;2`,
+          negative: `item;${id};-1`, decimal: `item;${id};1.0` }[kind]!
+      }
+      const before = (await getSplit(db, id, 'guild'))!
+      const upload = vi.spyOn(databaseModule, 'markUploaded')
+      const fetch = vi.fn()
+      vi.stubGlobal('fetch', fetch)
+      const response = await json(payload, true)
+      expect(response.type).toBe(4)
+      expect(response.data.flags).toBe(64)
+      expect(response.data.content).toContain(kind === 'stale' || kind === 'forged'
+        ? listingMoney(before.members[0].listing_amount) : '버튼을 다시 눌러 주세요.')
+      expect(upload).not.toHaveBeenCalled()
+      expect(fetch).not.toHaveBeenCalled()
+      expect(await getSplit(db, id, 'guild')).toEqual(before)
+      expect(before.members[0].status).toBe('pending')
+    })
+  it.each([false, true])('rejects a listing change during upload storage (excluded=%s)', async (excluded) => {
+    const id = await create({ ...defaults, 파티원2: second })
+    const payload = await modal(id)
+    const amount = (await getSplit(db, id, 'guild'))!.members[0].listing_amount
+    const save = databaseModule.markUploaded
+    vi.spyOn(databaseModule, 'markUploaded').mockImplementationOnce(async (...args) => {
+      const stored = (await getSplit(db, id, 'guild'))!
+      await databaseModule.savePercent(db, adjustPercent(stored, {
+        distributor: '60', [first]: excluded ? '0' : '10', [second]: excluded ? '40' : '30',
+      }), 'guild', distributor)
+      return save(...args)
+    })
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const response = await json(payload, true)
+    const latest = (await getSplit(db, id, 'guild'))!
+    expect(response.type).toBe(4)
+    expect(response.data.flags).toBe(64)
+    expect(response.data.content).toContain(excluded ? '분배받는 파티원 본인만' : listingMoney(latest.members[0].listing_amount))
+    expect(latest.members[0]).toMatchObject({ status: excluded ? 'excluded' : 'pending', item_name: null, uploaded_at: null })
+    expect(fetch).not.toHaveBeenCalled()
+    expect(await save(db, id, 'guild', first, '옛 가격', amount)).toBe(false)
+    expect(await getSplit(db, id, 'guild')).toEqual(latest)
+  })
   it('opens a required short modal, saves normalized input and prefills edits without changing the first timestamp', async () => {
     const id = await create()
     const open = await json(component('uploaded', id, first))
-    expect(open).toMatchObject({ type: 9, data: { custom_id: `item;${id}`, title: '경매장 등록', components: [{ type: 18, label: '등록한 아이템', component: { custom_id: 'item_name', style: 1, required: true, max_length: 100 } }] } })
+    expect(open).toMatchObject({ type: 9, data: { custom_id: `item;${id};${(await getSplit(db, id, 'guild'))!.members[0].listing_amount}`, title: '경매장 등록', components: [{ type: 18, label: '등록한 아이템', component: { custom_id: 'item_name', style: 1, required: true, max_length: 100 } }] } })
     expect(open.data.components[0].component.value).toBeUndefined()
     expect((await getSplit(db, id, 'guild'))!.members[0]).toMatchObject({ status: 'pending', item_name: null })
-    const saved = await json(modal(id, '  장갑\r\n이름  '))
+    const saved = await json(await modal(id, '  장갑\r\n이름  '))
     expect(saved.type).toBe(7)
     expect(saved.data.embeds[0].description).toContain('아이템: 장갑 이름')
     const original = (await getSplit(db, id, 'guild'))!.members[0]
@@ -869,25 +931,25 @@ describe('item registration and embed cards', () => {
     const reopened = await json(component('uploaded', id, first))
     expect(reopened.data.components[0].component.value).toBe('장갑 이름')
     await db.prepare('UPDATE split_members SET uploaded_at = ? WHERE split_id = ?').bind('2020-01-01T00:00:00Z', id).run()
-    await redraw(modal(id, '새 장갑'))
+    await redraw(await modal(id, '새 장갑'))
     expect((await getSplit(db, id, 'guild'))!.members[0]).toMatchObject({ item_name: '새 장갑', uploaded_at: '2020-01-01T00:00:00Z' })
   })
   it.each(['', '   ', '\r\n\t', '가'.repeat(101)])('rejects empty or oversized modal input %j', async (value) => {
     const id = await create()
-    await ephemeral(modal(id, value), '등록한 아이템을 1~100자로 입력해 주세요.')
+    await ephemeral(await modal(id, value), '등록한 아이템을 1~100자로 입력해 주세요.')
     expect((await getSplit(db, id, 'guild'))!.members[0]).toMatchObject({ status: 'pending', item_name: null, uploaded_at: null })
   })
   it('rechecks modal authorization including forged, zero-percent, distributor and cross-guild submissions', async () => {
     const id = await create({ ...defaults, 파티원2: second, 파티원2퍼센트: '0' })
     await json(component('uploaded', id, first))
     for (const user of [second, distributor, '999']) {
-      await ephemeral(modal(id, '위조', user), '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
+      await ephemeral(await modal(id, '위조', user), '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
     }
-    await ephemeral(modal(id, '위조', first, 'other'), '분배를 찾을 수 없어요.')
-    const noMessage = modal(id)
+    await ephemeral(await modal(id, '위조', first, 'other'), '분배를 찾을 수 없어요.')
+    const noMessage = await modal(id)
     delete (noMessage as { message?: unknown }).message
     await ephemeral(noMessage, '안내 메시지의 경매장 등록 버튼을 다시 눌러 주세요.')
-    await ephemeral(modal(`${id};extra`))
+    await ephemeral(await modal(`${id};extra`))
     expect((await getSplit(db, id, 'guild'))!.members.every((m) => m.item_name === null)).toBe(true)
   })
   it.each(['canceled', 'completed', 'purchased'] as const)('redraws without saving when %s after opening the modal', async (state) => {
@@ -903,7 +965,7 @@ describe('item registration and embed cards', () => {
       }
     }
     const before = await getSplit(db, id, 'guild')
-    await redraw(modal(id, '늦은 입력'))
+    await redraw(await modal(id, '늦은 입력'))
     await redraw(component('uploaded', id, first))
     expect(await getSplit(db, id, 'guild')).toEqual(before)
     // The SQL guard must also reject a direct stale write, independently of the handler guard.
@@ -915,7 +977,7 @@ describe('item registration and embed cards', () => {
     const name = '\\ * _ ~ ` | > # - [링크](https://x) <@123> @everyone'
     const escaped = escapeItemName(name)
     for (const char of ['\\', '*', '_', '~', '`', '|', '>', '#', '-', '[', ']', '<', '@']) expect(escapeItemName(char)).toBe(`\\${char}`)
-    const response = await redraw(modal(id, name))
+    const response = await redraw(await modal(id, name))
     expect(response.embeds[0].description).toContain(`아이템: ${escaped}`)
     expect(response.embeds[0].description).not.toContain('<@123>')
     expect(response.embeds[0].description).toContain('\\@everyone')
@@ -967,10 +1029,10 @@ describe('item registration and embed cards', () => {
   })
   it('notifies edits with escaped names and only mentions the distributor', async () => {
     const id = await create()
-    await json(modal(id))
+    await json(await modal(id))
     const calls: any[] = []
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => { calls.push(JSON.parse(init.body as string)); return new Response('{}') }))
-    expect((await request(modal(id, '<@123>'), true)).status).toBe(202)
+    expect((await request(await modal(id, '<@123>'), true)).status).toBe(202)
     await Promise.all(background)
     expect(calls[1]).toEqual({ content: `<@${distributor}> <@${first}>님이 아이템을 **${escapeItemName('<@123>')}**(으)로 수정했어요 · 경매장 등록가: **4822만3350 메소** (48223350)`, allowed_mentions: { parse: [], users: [distributor] } })
   })
@@ -981,7 +1043,7 @@ describe('callback transport and best-effort notifications', () => {
     const id = await create()
     const fetch = vi.fn()
     vi.stubGlobal('fetch', fetch)
-    expect((await json(modal(id))).type).toBe(7)
+    expect((await json(await modal(id))).type).toBe(7)
     const purchased = await json(component('purchased', id, distributor, first))
     expect(purchased.type).toBe(7)
     expect(purchased.data.embeds[0].title).toContain('✅')
@@ -994,7 +1056,7 @@ describe('callback transport and best-effort notifications', () => {
       calls.push({ url, body: JSON.parse(init.body as string) })
       return new Response('{}', { status: 200 })
     }))
-    const response = await request(modal(id), true)
+    const response = await request(await modal(id), true)
     expect(response.status).toBe(202)
     expect(await response.text()).toBe('')
     await Promise.all(background)
@@ -1016,7 +1078,7 @@ describe('callback transport and best-effort notifications', () => {
       if (failure === 'network') throw new Error('secret-url')
       return new Response('failure', { status: 500 })
     }))
-    expect((await request(modal(id), true)).status).toBe(202)
+    expect((await request(await modal(id), true)).status).toBe(202)
     await Promise.all(background)
     expect((await getSplit(db, id, 'guild'))?.members[0].status).toBe('uploaded')
     expect(log).toHaveBeenCalledWith('upload notification failed', { action: 'uploaded', status: failure === 'http' ? 500 : null })
@@ -1030,21 +1092,21 @@ describe('callback transport and best-effort notifications', () => {
       return new Response('failure', { status: 500 })
     })
     vi.stubGlobal('fetch', fetch)
-    expect((await request(modal(id), true)).status).toBe(202)
+    expect((await request(await modal(id), true)).status).toBe(202)
     await Promise.all(background)
     expect(fetch).toHaveBeenCalledTimes(1)
     expect(log).toHaveBeenCalledWith('interaction callback failed', failure === 'http' ? { action: 'uploaded', status: 500 } : { status: null })
     for (const secret of ['fake-token', 'fake-bot-token', 'https://private.invalid/secret']) expect(JSON.stringify(log.mock.calls)).not.toContain(secret)
     expect((await getSplit(db, id, 'guild'))?.members[0].status).toBe('uploaded')
     await markPurchased(db, id, 'guild', distributor, first)
-    const repeated = await request(modal(id), true)
+    const repeated = await request(await modal(id), true)
     expect((await repeated.json() as any).type).toBe(7)
     await Promise.all(background)
     expect(fetch).toHaveBeenCalledTimes(1)
   })
   it.each(['http', 'network'])('attempts the completion reaction and keeps completion on %s failure', async (failure) => {
     const id = await create()
-    await json(modal(id))
+    await json(await modal(id))
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
       if (!url.includes('/reactions/')) return new Response('{}')
