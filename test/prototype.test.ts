@@ -197,9 +197,10 @@ describe('creation and validation against local D1', () => {
     expect(rendered.content).not.toContain(`<@${second}>`)
     expect(rendered.allowed_mentions?.users).toEqual([first])
     expect(rendered.components?.[1]).toMatchObject({ components: [{ custom_id: `purchased;${id};${first}` }] })
-    await ephemeral(component('uploaded', id, second), '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
+    await ephemeral(component('uploaded', id, second), '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
     await redraw(component('purchased', id, distributor, second))
     expect((await getSplit(db, id, 'guild'))?.members[1].status).toBe('excluded')
+    await json(modal(id))
     const result = await json(component('purchased', id, distributor, first))
     expect(result.data.embeds[0].title).toContain('✅')
     expect(result.data.components).toEqual([])
@@ -275,6 +276,7 @@ describe('review regressions', () => {
     expect(await cancelSplit(db, id, 'guild', distributor)).toBe(false)
     expect(await getSplit(db, id, 'guild')).toEqual(before)
     const completedId = await create()
+    await markUploaded(db, completedId, 'guild', first, '장갑')
     await markPurchased(db, completedId, 'guild', distributor, first)
     expect(await cancelSplit(db, completedId, 'guild', distributor)).toBe(false)
     expect((await getSplit(db, completedId, 'guild'))?.split.status).toBe('completed')
@@ -329,14 +331,18 @@ describe('review regressions', () => {
   })
   it('only reacts after the last purchase in a two-member split', async () => {
     const id = await create({ ...defaults, 파티원2: second })
-    const fetch = vi.fn(async () => new Response('{}'))
+    await json(modal(id))
+    await json(modal(id, '장갑', second))
+    const fetch = vi.fn(async (_url: string) => new Response('{}'))
     vi.stubGlobal('fetch', fetch)
-    await json(component('purchased', id, distributor, first), true)
+    expect((await request(component('purchased', id, distributor, first), true)).status).toBe(202)
     await Promise.all(background)
-    expect(fetch).not.toHaveBeenCalled()
-    await json(component('purchased', id, distributor, second), true)
+    expect(fetch.mock.calls).toHaveLength(2)
+    expect(fetch.mock.calls.filter((call) => String(call[0]).includes('/reactions/'))).toHaveLength(0)
+    expect((await request(component('purchased', id, distributor, second), true)).status).toBe(202)
     await Promise.all(background)
-    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls.filter((call) => String(call[0]).includes('/reactions/'))).toHaveLength(1)
+    expect(fetch.mock.calls).toHaveLength(5)
   })
   it('logs sanitized handler error name and message without either token or request URL', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -352,8 +358,8 @@ describe('review regressions', () => {
 describe('buttons, concurrency and queries', () => {
   it('restricts upload to the member and purchase/cancel to the distributor', async () => {
     const id = await create()
-    await ephemeral(component('uploaded', id, distributor), '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
-    await ephemeral(component('uploaded', id, second), '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
+    await ephemeral(component('uploaded', id, distributor), '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
+    await ephemeral(component('uploaded', id, second), '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
     await ephemeral(component('purchased', id, first, first), '분배자만 이 버튼을 누를 수 있어요.')
     await ephemeral(component('cancel', id, first), '분배자만 이 버튼을 누를 수 있어요.')
     expect((await getSplit(db, id, 'guild'))?.members[0].status).toBe('pending')
@@ -366,8 +372,16 @@ describe('buttons, concurrency and queries', () => {
     expect((await json(component('uploaded', id, first))).type).toBe(9)
     expect((await getSplit(db, id, 'guild'))?.members[0].uploaded_at).not.toBeNull()
   })
-  it('purchases without upload, disables a purchased button and rejects duplicates', async () => {
+  it('rejects pending purchases in the handler and database, then enables only uploaded buttons', async () => {
     const id = await create({ ...defaults, 파티원2: second })
+    const before = (await getSplit(db, id, 'guild'))!
+    expect(renderSplit(before).components![1]).toMatchObject({ components: [{ disabled: true }, { disabled: true }] })
+    await ephemeral(component('purchased', id, distributor, first), '파티원이 아직 경매장 등록을 하지 않았어요.')
+    expect(await markPurchased(db, id, 'guild', distributor, first)).toEqual({ changed: false, completed: false })
+    expect(await getSplit(db, id, 'guild')).toEqual(before)
+    await json(modal(id))
+    await json(modal(id, '장갑', second))
+    expect(renderSplit((await getSplit(db, id, 'guild'))!).components![1]).toMatchObject({ components: [{ disabled: false }, { disabled: false }] })
     const response = await json(component('purchased', id, distributor, first))
     expect(response.type).toBe(7)
     expect(response.data.components[1].components[0].disabled).toBe(true)
@@ -383,6 +397,7 @@ describe('buttons, concurrency and queries', () => {
   })
   it('cancels without deleting or reverting prior purchases', async () => {
     const id = await create({ ...defaults, 파티원2: second })
+    await json(modal(id))
     await json(component('purchased', id, distributor, first))
     const response = await json(component('cancel', id))
     expect(response.data.embeds[0].description).toContain('이미 구매한 건은 봇이 되돌리지 못해요')
@@ -397,6 +412,8 @@ describe('buttons, concurrency and queries', () => {
   })
   it('does not lose changes from concurrent purchases', async () => {
     const id = await create({ ...defaults, 파티원2: second })
+    await json(modal(id))
+    await json(modal(id, '장갑', second))
     const results = await Promise.all([json(component('purchased', id, distributor, first)), json(component('purchased', id, distributor, second))])
     expect(results.every((r) => r.type === 7)).toBe(true)
     const stored = (await getSplit(db, id, 'guild'))!
@@ -412,6 +429,7 @@ describe('buttons, concurrency and queries', () => {
   })
   it('keeps cancel/purchase races terminal and consistent', async () => {
     const id = await create()
+    await json(modal(id))
     await Promise.all([json(component('cancel', id)), json(component('purchased', id, distributor, first))])
     const stored = (await getSplit(db, id, 'guild'))!
     expect(['canceled', 'completed']).toContain(stored.split.status)
@@ -443,7 +461,7 @@ describe('buttons, concurrency and queries', () => {
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toContain('**장갑**')
     await json(component('cancel', id))
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toBe('없어요.')
-    expect((await ephemeral(command('내역', {}))).embeds[0].description).toContain('취소')
+    expect((await ephemeral(command('내역', {}))).embeds[0].description).toBe('참여한 분배가 없어요.')
   })
   it('limits history to ten recent records and truncates long labels', async () => {
     for (let i = 0; i < 11; i++) {
@@ -458,6 +476,127 @@ describe('buttons, concurrency and queries', () => {
     payload.data.resolved.members[first].nick = '가'.repeat(100)
     const result = await json(payload)
     expect(Array.from(result.data.components[1].components[0].label)).toHaveLength(80)
+  })
+})
+
+describe('purchase flow regressions', () => {
+  it.each([null, '*장갑* <@123>'])('notifies the member once, after callback, with item %s', async (name) => {
+    const id = await create({ 총판매금액: 500000000, 수수료: 3, 파티원1: first, 파티원2: second })
+    if (name === null) await db.prepare("UPDATE split_members SET status = 'uploaded' WHERE split_id = ? AND user_id = ?").bind(id, first).run()
+    else await json(modal(id, name))
+    const calls: { url: string; body: any }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, body: JSON.parse(init.body as string) })
+      return new Response('{}')
+    }))
+    const receipt = (await getSplit(db, id, 'guild'))!.members[0].expected_receipt
+    expect((await request(component('purchased', id, distributor, first), true)).status).toBe(202)
+    await Promise.all(background)
+    expect(calls).toHaveLength(2)
+    expect(calls[0].url).toContain('/callback')
+    expect(calls[0].body.type).toBe(7)
+    expect(calls[1].url).toContain('/webhooks/')
+    expect(calls[1].body).toEqual({
+      content: `<@200> <@100>님이 ${name === null ? '등록한 아이템을 구매했어요' : `**${escapeItemName(name)}** 구매했어요`} · 실수령액: ${money(receipt)}`,
+      allowed_mentions: { parse: [], users: [first] },
+    })
+    expect((await getSplit(db, id, 'guild'))!.members[0].status).toBe('purchased')
+    expect((await json(component('purchased', id, distributor, first), true)).type).toBe(7)
+    await Promise.all(background)
+    expect(calls).toHaveLength(2)
+  })
+  it('sends the exact final purchase notification as well as the completion reaction', async () => {
+    const id = await create({ 총판매금액: 500000000, 수수료: 3, 파티원1: first })
+    await json(modal(id))
+    const calls: { url: string; body: any }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, body: init.body ? JSON.parse(init.body as string) : null })
+      return new Response('{}')
+    }))
+    expect((await request(component('purchased', id, distributor, first), true)).status).toBe(202)
+    await Promise.all(background)
+    const callback = calls.findIndex((call) => call.url.includes('/callback'))
+    const notification = calls.findIndex((call) => call.url.includes('/webhooks/'))
+    expect(notification).toBeGreaterThan(callback)
+    expect(calls[notification].body).toEqual({ content: '<@200> <@100>님이 **장갑** 구매했어요 · 실수령액: 2억3880만7106 메소', allowed_mentions: { parse: [], users: [first] } })
+    expect(calls.filter((call) => call.url.includes('/reactions/'))).toHaveLength(1)
+    expect((await getSplit(db, id, 'guild'))!.split.status).toBe('completed')
+  })
+  it.each(['callback-http', 'callback-network', 'notification-http', 'notification-network'])('preserves purchase without retry on %s failure', async (failure) => {
+    const id = await create({ ...defaults, 파티원2: second })
+    await json(modal(id))
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const fetch = vi.fn(async (url: string) => {
+      const failing = url.includes('/callback') === failure.startsWith('callback')
+      if (!failing) return new Response('{}')
+      if (failure.endsWith('network')) throw new Error('fake-token fake-bot-token https://private.invalid/secret')
+      return new Response('failure', { status: 500 })
+    })
+    vi.stubGlobal('fetch', fetch)
+    expect((await request(component('purchased', id, distributor, first), true)).status).toBe(202)
+    await Promise.all(background)
+    expect(fetch).toHaveBeenCalledTimes(failure.startsWith('callback') ? 1 : 2)
+    const stored = (await getSplit(db, id, 'guild'))!
+    expect(stored.members[0].status).toBe('purchased')
+    expect(stored.split.status).toBe('active')
+    expect(log).toHaveBeenCalledWith(failure.startsWith('callback') ? 'interaction callback failed' : 'purchase notification failed',
+      failure === 'callback-network' ? { status: null } : { action: 'purchased', status: failure.endsWith('http') ? 500 : null })
+    for (const secret of ['fake-token', 'fake-bot-token', 'https://private.invalid/secret']) expect(JSON.stringify(log.mock.calls)).not.toContain(secret)
+    await redraw(component('purchased', id, distributor, first))
+    expect(fetch).toHaveBeenCalledTimes(failure.startsWith('callback') ? 1 : 2)
+  })
+  it('excludes more than eleven canceled records before the history limit for both roles', async () => {
+    const kept = await create()
+    await db.prepare('UPDATE splits SET created_at = ? WHERE id = ?').bind('2020-01-01T00:00:00Z', kept).run()
+    for (let i = 0; i < 12; i++) {
+      const id = await create()
+      await cancelSplit(db, id, 'guild', distributor)
+    }
+    for (const user of [distributor, first]) {
+      const result = await ephemeral(command('내역', {}, user))
+      expect(result.embeds[0].description.split('\n\n')).toHaveLength(1)
+      expect(result.embeds[0].description).toContain(`<t:${Date.parse('2020-01-01T00:00:00Z') / 1000}:d>`)
+      expect(result.embeds[0].description).not.toContain('취소')
+    }
+    expect((await db.prepare("SELECT COUNT(*) AS n FROM splits WHERE status = 'canceled'").first<{ n: number }>())!.n).toBe(12)
+  })
+})
+
+describe('card percentage display', () => {
+  function card(options: Options) {
+    const payload = command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first, ...options })
+    payload.data.resolved.users['400'] = { id: '400', username: '셋째' }
+    return buildSplit(payload as unknown as APIChatInputApplicationCommandInteraction)
+  }
+  it.each([
+    {},
+    { 분배자퍼센트: '50', 파티원1퍼센트: '50' },
+    { 분배자퍼센트: '50', 파티원1퍼센트: '50', 파티원2: second, 파티원2퍼센트: '0' },
+    { 파티원2: second, 파티원3: '400' },
+  ])('hides exactly equal visible shares: %j', (options) => {
+    const text = renderSplit(card(options)).embeds![0].description!
+    expect(text).not.toMatch(/ · [\d.]+%/)
+  })
+  it.each([
+    [{ 분배자퍼센트: '40', 파티원2: second, 파티원3: '400' }, ['40', '20', '20', '20']],
+    [{ 분배자퍼센트: '50', 파티원2: second, 파티원3: '400' }, ['50', '16.67', '16.67', '16.67']],
+    [{ 분배자퍼센트: '0', 파티원1퍼센트: '50', 파티원2: second, 파티원2퍼센트: '50' }, ['0', '50', '50']],
+    [{ 분배자퍼센트: '12.5', 파티원1퍼센트: '87.5' }, ['12.5', '87.5']],
+    [{ 분배자퍼센트: '33.33', 파티원2: second }, ['33.33', '33.34', '33.34']],
+  ] as [Options, string[]][])('shows every visible share with rounded, trimmed percentages: %j', (options, expected) => {
+    const text = renderSplit(card(options)).embeds![0].description!
+    expect([...text.matchAll(/ · ([\d.]+)%/g)].map((match) => match[1])).toEqual(expected)
+  })
+  it('renders the exact 60/40 pending card and preserves percentages after registration', () => {
+    const stored = card({ 분배자퍼센트: '60', 파티원1퍼센트: '40' })
+    expect(renderSplit(stored).embeds![0].description).toBe([
+      '총판매액: 5억0000만0000 메소', '실수령액: 4억8500만0000 메소', '경매장 수수료: 3%', '',
+      '분배자 <@100> · 60%', '실수령액: 2억8744만3992 메소', '',
+      '<@200> · 40% · ⏳ 대기', '경매장 등록가: **1억9755만6008 메소** (197556008)', '실수령액: 1억9162만9327 메소',
+    ].join('\n'))
+    stored.members[0].status = 'uploaded'
+    stored.members[0].item_name = '*장갑*'
+    expect(renderSplit(stored).embeds![0].description).toContain('<@200> · 40% · 📦 등록 완료\n아이템: \\*장갑\\*')
   })
 })
 
@@ -485,7 +624,7 @@ describe('message amount formatting', () => {
     const status = state === 'uploaded' ? '📦 등록 완료' : state === 'purchased' ? '✅ 구매 완료' : '⏳ 대기'
     const description = renderSplit(stored).embeds![0].description!
     expect(description).toBe([
-      '아이템 판매액: 5억0000만0000 메소',
+      '총판매액: 5억0000만0000 메소',
       '실수령액: 4억8500만0000 메소',
       '경매장 수수료: 3%', '',
       '분배자 <@100>', '실수령액: 2억3880만7107 메소', '',
@@ -507,7 +646,7 @@ describe('message amount formatting', () => {
     expect(queues.embeds![1].description).toBe(`<@200> · 📦 등록 완료\n아이템: **장갑**\n경매장 등록가: **2억4619만2893 메소** (246192893)\n<#channel> · ${timestamp}`)
     for (const embed of queues.embeds!) expect(embed.description!.match(/\((\d+)\)/)?.[1]).toBe(String(pending.listing_amount))
     expect(renderHistory([{ ...stored.split, created_at, my_share: stored.members[0].expected_receipt }]).embeds![0].description)
-      .toBe(`${timestamp} · 분배자 <@100>\n아이템 판매액: 5억0000만0000 메소\n내 실수령액: 2억3880만7106 메소 · 🔵 진행 중`)
+      .toBe(`${timestamp} · 분배자 <@100>\n총판매액: 5억0000만0000 메소\n내 실수령액: 2억3880만7106 메소 · 🔵 진행 중`)
     expect(splitErrorMessages.AMOUNT_TOO_SMALL).toBe('판매금액이 너무 작아서 받을 몫이 있는 파티원의 경매장 등록가가 0메소예요.')
   })
 })
@@ -516,7 +655,7 @@ describe('item registration and embed cards', () => {
   it('opens a required short modal, saves normalized input and prefills edits without changing the first timestamp', async () => {
     const id = await create()
     const open = await json(component('uploaded', id, first))
-    expect(open).toMatchObject({ type: 9, data: { custom_id: `item;${id}`, title: '아이템 등록', components: [{ type: 1, components: [{ custom_id: 'item_name', label: '등록한 아이템', style: 1, required: true, max_length: 100 }] }] } })
+    expect(open).toMatchObject({ type: 9, data: { custom_id: `item;${id}`, title: '경매장 등록', components: [{ type: 1, components: [{ custom_id: 'item_name', label: '등록한 아이템', style: 1, required: true, max_length: 100 }] }] } })
     expect(open.data.components[0].components[0].value).toBeUndefined()
     expect((await getSplit(db, id, 'guild'))!.members[0]).toMatchObject({ status: 'pending', item_name: null })
     const saved = await json(modal(id, '  장갑\r\n이름  '))
@@ -540,12 +679,12 @@ describe('item registration and embed cards', () => {
     const id = await create({ ...defaults, 파티원2: second, 파티원2퍼센트: '0' })
     await json(component('uploaded', id, first))
     for (const user of [second, distributor, '999']) {
-      await ephemeral(modal(id, '위조', user), '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
+      await ephemeral(modal(id, '위조', user), '분배받는 파티원 본인만 경매장 등록을 할 수 있어요.')
     }
     await ephemeral(modal(id, '위조', first, 'other'), '분배를 찾을 수 없어요.')
     const noMessage = modal(id)
     delete (noMessage as { message?: unknown }).message
-    await ephemeral(noMessage)
+    await ephemeral(noMessage, '안내 메시지의 경매장 등록 버튼을 다시 눌러 주세요.')
     await ephemeral(modal(`${id};extra`))
     expect((await getSplit(db, id, 'guild'))!.members.every((m) => m.item_name === null)).toBe(true)
   })
@@ -554,8 +693,12 @@ describe('item registration and embed cards', () => {
     await json(component('uploaded', id, first))
     if (state === 'canceled') await cancelSplit(db, id, 'guild', distributor)
     else {
+      await markUploaded(db, id, 'guild', first, '장갑')
       await markPurchased(db, id, 'guild', distributor, first)
-      if (state === 'completed') await markPurchased(db, id, 'guild', distributor, second)
+      if (state === 'completed') {
+        await markUploaded(db, id, 'guild', second, '장갑')
+        await markPurchased(db, id, 'guild', distributor, second)
+      }
     }
     const before = await getSplit(db, id, 'guild')
     await redraw(modal(id, '늦은 입력'))
@@ -590,7 +733,7 @@ describe('item registration and embed cards', () => {
     expect(active.embeds![0]).toMatchObject({ title: '💰 분배 진행 중 (0/1 구매 완료)', color: 0x5865F2 })
     expect(active.embeds![0].description).toContain('아이템 미입력')
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toContain('아이템 미입력')
-    expect(active.components![0]).toMatchObject({ components: [{ label: '아이템 등록', custom_id: `uploaded;${id}` }] })
+    expect(active.components![0]).toMatchObject({ components: [{ label: '경매장 등록', custom_id: `uploaded;${id}` }] })
     for (const [state, title, color] of [['completed', '✅ 분배 완료', 0x57F287], ['canceled', '🚫 분배 취소', 0x99AAB5]] as const) {
       stored.split.status = state
       const card = renderSplit(stored)
@@ -637,7 +780,9 @@ describe('callback transport and best-effort notifications', () => {
     const fetch = vi.fn()
     vi.stubGlobal('fetch', fetch)
     expect((await json(modal(id))).type).toBe(7)
-    expect((await json(component('purchased', id, distributor, first))).data.embeds[0].title).toContain('✅')
+    const purchased = await json(component('purchased', id, distributor, first))
+    expect(purchased.type).toBe(7)
+    expect(purchased.data.embeds[0].title).toContain('✅')
     expect(fetch).not.toHaveBeenCalled()
   })
   it('returns empty 202 and sends callback before distributor notification', async () => {
@@ -686,7 +831,7 @@ describe('callback transport and best-effort notifications', () => {
     expect((await request(modal(id), true)).status).toBe(202)
     await Promise.all(background)
     expect(fetch).toHaveBeenCalledTimes(1)
-    expect(log).toHaveBeenCalledWith('interaction callback failed', { action: 'uploaded', status: failure === 'http' ? 500 : null })
+    expect(log).toHaveBeenCalledWith('interaction callback failed', failure === 'http' ? { action: 'uploaded', status: 500 } : { status: null })
     for (const secret of ['fake-token', 'fake-bot-token', 'https://private.invalid/secret']) expect(JSON.stringify(log.mock.calls)).not.toContain(secret)
     expect((await getSplit(db, id, 'guild'))?.members[0].status).toBe('uploaded')
     await markPurchased(db, id, 'guild', distributor, first)
@@ -697,14 +842,15 @@ describe('callback transport and best-effort notifications', () => {
   })
   it.each(['http', 'network'])('attempts the completion reaction and keeps completion on %s failure', async (failure) => {
     const id = await create()
+    await json(modal(id))
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => {
+    const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (!url.includes('/reactions/')) return new Response('{}')
       if (failure === 'network') throw new Error('private-url')
       return new Response('forbidden', { status: 403 })
     })
     vi.stubGlobal('fetch', fetch)
-    const response = await json(component('purchased', id, distributor, first), true)
-    expect(response.data.embeds[0].title).toContain('✅')
+    expect((await request(component('purchased', id, distributor, first), true)).status).toBe(202)
     await Promise.all(background)
     expect(fetch.mock.calls[0][0]).toContain('/channels/channel/messages/message/reactions/%E2%9C%85/@me')
     expect(log).toHaveBeenCalledWith('completion reaction failed', { action: 'purchased', status: failure === 'http' ? 403 : null })
