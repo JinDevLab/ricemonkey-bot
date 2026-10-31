@@ -130,7 +130,11 @@ app.modal('percent', guarded<ModalContext<Env>>(async (c) => {
   if (stored.split.status !== 'active') return c.update().res(renderSplit(stored))
   const values = Object.fromEntries(['distributor', ...stored.members.map((m) => m.user_id)].map((key) => [key, c.get(key)]))
   const adjusted = adjustPercent(stored, values)
-  if (!await savePercent(database(c), adjusted, guild, user)) return reject(c, percentLocked)
+  if (!await savePercent(database(c), adjusted, guild, user)) {
+    const latest = await getSplit(database(c), stored.split.id, guild)
+    if (!latest) throw new Error('Split disappeared')
+    return latest.split.status !== 'active' ? c.update().res(renderSplit(latest)) : reject(c, percentLocked)
+  }
   const latest = await getSplit(database(c), stored.split.id, guild)
   if (!latest) throw new Error('Split disappeared')
   const changed = latest.members.filter((m, i) => m.listing_amount !== stored.members[i].listing_amount).map((m) => m.user_id)

@@ -456,6 +456,19 @@ describe('split and percentage modals', () => {
     if (state === 'uploaded' || state === 'purchased') await ephemeral(stale)
     expect(await getSplit(db, id, 'guild')).toEqual(before)
   })
+  it('redraws the canceled card when cancellation wins against percentage storage', async () => {
+    const id = await create()
+    const payload = await percentModal(id, { distributor: '60' })
+    const save = databaseModule.savePercent
+    vi.spyOn(databaseModule, 'savePercent').mockImplementationOnce(async (...args) => {
+      await cancelSplit(db, id, 'guild', distributor)
+      return save(...args)
+    })
+    const response = await redraw(payload)
+    expect(response.embeds[0].title).toBe('🚫 분배 취소')
+    expect(response.components).toEqual([])
+    expect((await getSplit(db, id, 'guild'))!.split).toMatchObject({ status: 'canceled', distributor_percent_hundredths: null })
+  })
   it('rejects a registration between handler read and batch save without partial writes', async () => {
     const id = await create()
     const save = databaseModule.savePercent
