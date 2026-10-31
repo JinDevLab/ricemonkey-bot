@@ -137,10 +137,16 @@ app.modal('percent', guarded<ModalContext<Env>>(async (c) => {
   }
   const latest = await getSplit(database(c), stored.split.id, guild)
   if (!latest) throw new Error('Split disappeared')
-  const changed = latest.members.filter((m, i) => m.listing_amount !== stored.members[i].listing_amount).map((m) => m.user_id)
+  const changed = latest.members.filter((m, i) => m.listing_amount !== stored.members[i].listing_amount)
   if (!changed.length) return c.update().res(renderSplit(latest))
-  return updateWithNotification(c, renderSplit(latest), 'percent',
-    `${changed.map((id) => `<@${id}>`).join(' ')} <@${user}>님이 비율을 바꿨어요. 경매장 등록가를 다시 확인해 주세요.`, changed)
+  const included = changed.filter((m) => m.listing_amount > 0)
+  const excluded = changed.filter((m) => m.listing_amount === 0)
+  const mentions = (members: typeof changed) => members.map((m) => `<@${m.user_id}>`).join(' ')
+  const content = [
+    ...(included.length ? [`${mentions(included)} <@${user}>님이 비율을 바꿨어요. 경매장 등록가를 다시 확인해 주세요.`] : []),
+    ...(excluded.length ? [`${mentions(excluded)} <@${user}>님이 비율을 바꿔서 이번 분배에서 제외됐어요. 이미 올렸다면 내려 주세요.`] : []),
+  ].join('\n')
+  return updateWithNotification(c, renderSplit(latest), 'percent', content, changed.map((m) => m.user_id))
 }))
 
 for (const name of ['미완료', '내역']) {

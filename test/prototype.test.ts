@@ -482,6 +482,37 @@ describe('split and percentage modals', () => {
     expect(latest.split).toEqual(before.split)
     expect(latest.members[0]).toMatchObject({ percent_hundredths: null, listing_amount: before.members[0].listing_amount, status: 'uploaded' })
   })
+  it.each([false, true])('notifies newly excluded members with removal instructions (mixed=%s)', async (mixed) => {
+    const id = await create({ ...defaults, 파티원2: second })
+    await redraw(await percentModal(id, { distributor: '40', [first]: '30', [second]: '30' }))
+    const payload = await percentModal(id, { distributor: mixed ? '60' : '70', [first]: mixed ? '40' : '30', [second]: '0' })
+    const calls: any[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push(JSON.parse(init.body as string)); return new Response('{}')
+    }))
+    expect((await request(payload, true)).status).toBe(202)
+    await Promise.all(background)
+    // The first member's amount changes even with the same percentage because the distributor's percentage changed.
+    expect(calls[1]).toEqual({ content: [
+      `<@${first}> <@${distributor}>님이 비율을 바꿨어요. 경매장 등록가를 다시 확인해 주세요.`,
+      `<@${second}> <@${distributor}>님이 비율을 바꿔서 이번 분배에서 제외됐어요. 이미 올렸다면 내려 주세요.`,
+    ].join('\n'), allowed_mentions: { parse: [], users: [first, second] } })
+  })
+  it('omits the positive-amount line when only an excluded member changes', async () => {
+    const id = await create({ ...defaults, 총판매금액: 200, 파티원2: second })
+    await redraw(await percentModal(id, { distributor: '49', [first]: '50', [second]: '1' }))
+    const before = (await getSplit(db, id, 'guild'))!
+    const payload = await percentModal(id, { distributor: '50', [first]: '50', [second]: '0' })
+    const calls: any[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push(JSON.parse(init.body as string)); return new Response('{}')
+    }))
+    await request(payload, true)
+    await Promise.all(background)
+    expect((await getSplit(db, id, 'guild'))!.members[0].listing_amount).toBe(before.members[0].listing_amount)
+    expect(calls[1]).toEqual({ content: `<@${second}> <@${distributor}>님이 비율을 바꿔서 이번 분배에서 제외됐어요. 이미 올렸다면 내려 주세요.`,
+      allowed_mentions: { parse: [], users: [second] } })
+  })
   it('notifies all and only members whose listing amount changed, after updating the card', async () => {
     const id = await create({ ...defaults, 파티원2: second })
     await redraw(await percentModal(id, { distributor: '50', [first]: '50', [second]: '0' }))
