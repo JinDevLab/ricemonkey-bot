@@ -11,7 +11,7 @@ import { buildSplit } from '../src/input'
 import type { APIChatInputApplicationCommandInteraction } from 'discord-api-types/v10'
 import { parsePercent, splitErrorMessages } from '../src/input'
 import { commands, registrationCommands } from '../src/commands'
-import { escapeItemName, renderSplit, renderUnfinished } from '../src/render'
+import { escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from '../src/render'
 
 const keys = generateKeyPairSync('ed25519')
 const publicKey = Buffer.from(keys.publicKey.export({ format: 'jwk' }).x!, 'base64url').toString('hex')
@@ -175,7 +175,7 @@ describe('creation and validation against local D1', () => {
     expect(stored.members.every((m) => m.listing_amount === listing && m.expected_receipt === receipt)).toBe(true)
     expect(stored.split.distributor_percent_hundredths).toBe('분배자퍼센트' in percentages ? Number(percentages.분배자퍼센트) * 100 : null)
     expect(result.data.allowed_mentions.users).toHaveLength(count)
-    expect(result.data.embeds[0].description).toContain('100,000,000')
+    expect(result.data.embeds[0].description).toContain('1억0000만0000 메소')
   })
   it('keeps skipped member slots in numeric input order and uses display-name fallbacks', async () => {
     const id = await create({ ...defaults, 파티원5: second })
@@ -316,7 +316,7 @@ describe('review regressions', () => {
       expect(text.match(/<#channel-/g)).toHaveLength(10)
       expect(text).toContain('더 있어요')
       expect(text).toContain(`<@${mention}>`)
-      expect(text).toContain('48,223,350메소')
+      expect(text).toContain('경매장 등록가: **4822만3350 메소** (48223350)')
       expect(text).toContain(`<t:${Date.parse('2026-10-01T23:30:00Z') / 1000}:d>`)
       expect(text).not.toContain('<#channel-10>')
       expect(text).not.toContain(ids[0])
@@ -429,13 +429,13 @@ describe('buttons, concurrency and queries', () => {
   it('shows personal pending queues and history shares only in the current guild', async () => {
     const id = await create()
     const memberPending = await ephemeral(command('미완료', {}, first))
-    expect(memberPending.embeds[0].description).toContain('48,223,350')
+    expect(memberPending.embeds[0].description).toContain('**4822만3350 메소** (48223350)')
     expect(memberPending.allowed_mentions).toEqual({ parse: [], users: [] })
     const ownPending = await ephemeral(command('미완료', {}))
     expect(ownPending.embeds[1].description).toContain(`<@${first}>`)
     expect((await ephemeral(command('미완료', {}, first, 'other'))).embeds[0].description).toBe('없어요.')
-    expect((await ephemeral(command('내역', {}, first))).embeds[0].description).toContain('46,776,649')
-    expect((await ephemeral(command('내역', {}))).embeds[0].description).toContain('46,776,650')
+    expect((await ephemeral(command('내역', {}, first))).embeds[0].description).toContain('4677만6649 메소')
+    expect((await ephemeral(command('내역', {}))).embeds[0].description).toContain('4677만6650 메소')
     expect((await ephemeral(command('내역', {}, first, 'other'))).embeds[0].description).toBe('참여한 분배가 없어요.')
     await json(modal(id))
     expect((await ephemeral(command('미완료', {}, first))).embeds[0].description).toBe('없어요.')
@@ -458,6 +458,57 @@ describe('buttons, concurrency and queries', () => {
     payload.data.resolved.members[first].nick = '가'.repeat(100)
     const result = await json(payload)
     expect(Array.from(result.data.components[1].components[0].label)).toHaveLength(80)
+  })
+})
+
+describe('message amount formatting', () => {
+  it.each([
+    [240000000, '2억4000만0000 메소'],
+    [246192893, '2억4619만2893 메소'],
+    [240050000, '2억4005만0000 메소'],
+    [200050000, '2억0005만0000 메소'],
+    [1000000000, '10억0000만0000 메소'],
+    [500000000, '5억0000만0000 메소'],
+    [40000000, '4000만0000 메소'],
+    [12345, '1만2345 메소'], [1234, '1234 메소'], [0, '0 메소'],
+    [9007199254740991, '90071992억5474만0991 메소'],
+  ])('preserves every digit of %s', (value, expected) => {
+    expect(money(value)).toBe(expected)
+    expect(listingMoney(value)).toBe(`**${expected}** (${value})`)
+    expect(listingMoney(value).match(/\((\d+)\)$/)?.[1]).toBe(String(value))
+  })
+  it.each(['pending', 'uploaded', 'purchased', 'canceled'] as const)('renders the entire %s description', (state) => {
+    const stored = buildSplit(command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first }) as unknown as APIChatInputApplicationCommandInteraction)
+    if (state === 'canceled') stored.split.status = 'canceled'
+    else stored.members[0].status = state
+    if (state === 'uploaded' || state === 'purchased') stored.members[0].item_name = '*장갑*'
+    const status = state === 'uploaded' ? '📦 등록 완료' : state === 'purchased' ? '✅ 구매 완료' : '⏳ 대기'
+    const description = renderSplit(stored).embeds![0].description!
+    expect(description).toBe([
+      '아이템 판매액: 5억0000만0000 메소',
+      '실수령액: 4억8500만0000 메소',
+      '경매장 수수료: 3%', '',
+      '분배자 <@100>', '실수령액: 2억3880만7107 메소', '',
+      `<@200> · ${status}`,
+      ...(state === 'uploaded' || state === 'purchased' ? ['아이템: \\*장갑\\*'] : []),
+      '경매장 등록가: **2억4619만2893 메소** (246192893)',
+      '실수령액: 2억3880만7106 메소',
+      ...(state === 'canceled' ? ['', '이미 구매한 건은 봇이 되돌리지 못해요.'] : []),
+    ].join('\n'))
+    expect(description.match(/경매장 등록가: \*\*[^\n]+\*\* \((\d+)\)/)?.[1]).toBe(String(stored.members[0].listing_amount))
+  })
+  it('renders both unfinished queues and history with exact line order', () => {
+    const stored = buildSplit(command('분배', { 총판매금액: 500000000, 수수료: 3, 파티원1: first }) as unknown as APIChatInputApplicationCommandInteraction)
+    const created_at = '2026-10-01T00:00:00Z'
+    const timestamp = `<t:${Date.parse(created_at) / 1000}:d>`
+    const pending = { ...stored.members[0], ...stored.split, user_id: first, status: 'uploaded' as const, item_name: '장갑', created_at }
+    const queues = renderUnfinished({ upload: [pending], purchase: [pending] })
+    expect(queues.embeds![0].description).toBe(`<@100> · 경매장 등록가: **2억4619만2893 메소** (246192893)\n<#channel> · ${timestamp}`)
+    expect(queues.embeds![1].description).toBe(`<@200> · 📦 등록 완료\n아이템: **장갑**\n경매장 등록가: **2억4619만2893 메소** (246192893)\n<#channel> · ${timestamp}`)
+    for (const embed of queues.embeds!) expect(embed.description!.match(/\((\d+)\)/)?.[1]).toBe(String(pending.listing_amount))
+    expect(renderHistory([{ ...stored.split, created_at, my_share: stored.members[0].expected_receipt }]).embeds![0].description)
+      .toBe(`${timestamp} · 분배자 <@100>\n아이템 판매액: 5억0000만0000 메소\n내 실수령액: 2억3880만7106 메소 · 🔵 진행 중`)
+    expect(splitErrorMessages.AMOUNT_TOO_SMALL).toBe('판매금액이 너무 작아서 받을 몫이 있는 파티원의 경매장 등록가가 0메소예요.')
   })
 })
 
@@ -551,6 +602,12 @@ describe('item registration and embed cards', () => {
     const stored = buildSplit(command() as unknown as APIChatInputApplicationCommandInteraction)
     stored.members = Array.from({ length: 5 }, (_, i) => ({ ...stored.members[0], user_id: '9'.repeat(19) + i, item_name: '*'.repeat(100), status: 'uploaded' }))
     stored.split.total_sale = Number.MAX_SAFE_INTEGER
+    stored.split.net_sale = Number.MAX_SAFE_INTEGER
+    stored.split.distributor_final = Number.MAX_SAFE_INTEGER
+    for (const member of stored.members) {
+      member.listing_amount = Number.MAX_SAFE_INTEGER
+      member.expected_receipt = Number.MAX_SAFE_INTEGER
+    }
     const pending = Array.from({ length: 11 }, (_, i) => ({ id: String(i), user_id: '9'.repeat(20), distributor_id: '8'.repeat(20), channel_id: '7'.repeat(20), listing_amount: Number.MAX_SAFE_INTEGER, item_name: '*'.repeat(100), status: 'uploaded' as const, created_at: stored.split.created_at }))
     const cards = [renderSplit(stored), renderUnfinished({ upload: pending, purchase: pending })]
     for (const card of cards) {
@@ -570,7 +627,7 @@ describe('item registration and embed cards', () => {
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => { calls.push(JSON.parse(init.body as string)); return new Response('{}') }))
     expect((await request(modal(id, '<@123>'), true)).status).toBe(202)
     await Promise.all(background)
-    expect(calls[1]).toEqual({ content: `<@${distributor}> <@${first}>님이 아이템을 **${escapeItemName('<@123>')}**(으)로 수정했어요 · 48,223,350메소`, allowed_mentions: { parse: [], users: [distributor] } })
+    expect(calls[1]).toEqual({ content: `<@${distributor}> <@${first}>님이 아이템을 **${escapeItemName('<@123>')}**(으)로 수정했어요 · 경매장 등록가: **4822만3350 메소** (48223350)`, allowed_mentions: { parse: [], users: [distributor] } })
   })
 })
 
@@ -599,7 +656,9 @@ describe('callback transport and best-effort notifications', () => {
     expect(calls[0].body.type).toBe(7)
     expect(calls[1].url).toContain('/webhooks/app/fake-token')
     expect(calls[1].body.allowed_mentions).toEqual({ parse: [], users: [distributor] })
-    expect(calls[1].body.content).toBe(`<@${distributor}> <@${first}>님이 **장갑** 등록했어요 · 48,223,350메소`)
+    expect(calls[1].body.content).toBe(`<@${distributor}> <@${first}>님이 **장갑** 등록했어요 · 경매장 등록가: **4822만3350 메소** (48223350)`)
+    expect(calls[1].body.content.match(/경매장 등록가: \*\*[^\n]+\*\* \((\d+)\)$/)?.[1])
+      .toBe(String((await getSplit(db, id, 'guild'))!.members[0].listing_amount))
     expect(calls[1].body.content).not.toContain(id)
   })
   it.each(['http', 'network'])('preserves upload on followup %s failure', async (failure) => {

@@ -3,7 +3,7 @@ import type { CommandContext, ComponentContext, ModalContext } from 'discord-hon
 import type { APIChatInputApplicationCommandInteraction } from 'discord-api-types/v10'
 import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, unfinished } from './db'
 import { buildSplit, InputError } from './input'
-import { escapeItemName, money, renderHistory, renderSplit, renderUnfinished } from './render'
+import { escapeItemName, listingMoney, renderHistory, renderSplit, renderUnfinished } from './render'
 
 export interface Bindings {
   DB?: D1Database
@@ -153,7 +153,7 @@ app.modal('item', guarded<ModalContext<Env>>(async (c) => {
       const name = escapeItemName(itemName)
       const text = member.status === 'pending' ? `**${name}** 등록했어요` : `아이템을 **${name}**(으)로 수정했어요`
       const notification = await c.rest('POST', $webhooks$_$_, [c.interaction.application_id, c.interaction.token], {
-        content: `<@${stored.split.distributor_id}> <@${user}>님이 ${text} · ${money(member.listing_amount)}메소`,
+        content: `<@${stored.split.distributor_id}> <@${user}>님이 ${text} · 경매장 등록가: ${listingMoney(member.listing_amount)}`,
         allowed_mentions: { parse: [], users: [stored.split.distributor_id] },
       })
       if (!notification.ok) console.error('upload notification failed', { action, status: notification.status })
