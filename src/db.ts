@@ -23,6 +23,7 @@ export interface MemberRow {
   listing_amount: number
   expected_receipt: number
   status: 'pending' | 'uploaded' | 'purchased' | 'excluded'
+  item_name: string | null
   uploaded_at: string | null
   purchased_at: string | null
 }
@@ -62,11 +63,11 @@ export async function getSplit(db: D1Database, id: string, guild: string): Promi
   return split ? { split, members: members.results as unknown as MemberRow[] } : null
 }
 
-export async function markUploaded(db: D1Database, id: string, guild: string, user: string) {
-  const result = await db.prepare(`UPDATE split_members SET status = 'uploaded', uploaded_at = ?
-    WHERE split_id = ? AND user_id = ? AND status = 'pending'
+export async function markUploaded(db: D1Database, id: string, guild: string, user: string, itemName: string) {
+  const result = await db.prepare(`UPDATE split_members SET status = 'uploaded', item_name = ?, uploaded_at = COALESCE(uploaded_at, ?)
+    WHERE split_id = ? AND user_id = ? AND status IN ('pending', 'uploaded')
     AND EXISTS (SELECT 1 FROM splits WHERE id = ? AND guild_id = ? AND status = 'active')`)
-    .bind(new Date().toISOString(), id, user, id, guild).run()
+    .bind(itemName, new Date().toISOString(), id, user, id, guild).run()
   return result.meta.changes > 0
 }
 
@@ -96,6 +97,7 @@ export interface PendingRow {
   id: string
   user_id: string
   listing_amount: number
+  item_name: string | null
   status: MemberRow['status']
   distributor_id: string
   channel_id: string
@@ -105,11 +107,11 @@ export interface PendingRow {
 export async function unfinished(db: D1Database, guild: string, user: string) {
   // Bound the response as well as the number of returned rows; no Discord message can grow unbounded.
   const [upload, purchase] = await db.batch([
-    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.status, s.distributor_id, s.channel_id, s.created_at
+    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.item_name, m.status, s.distributor_id, s.channel_id, s.created_at
       FROM split_members m JOIN splits s ON s.id = m.split_id
       WHERE m.user_id = ? AND m.status = 'pending' AND s.guild_id = ? AND s.status = 'active'
       ORDER BY s.created_at ASC, s.id ASC LIMIT 11`).bind(user, guild),
-    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.status, s.distributor_id, s.channel_id, s.created_at
+    db.prepare(`SELECT s.id, m.user_id, m.listing_amount, m.item_name, m.status, s.distributor_id, s.channel_id, s.created_at
       FROM splits s JOIN split_members m ON m.split_id = s.id
       WHERE s.guild_id = ? AND s.distributor_id = ? AND s.status = 'active'
       AND m.status IN ('pending', 'uploaded') ORDER BY s.created_at ASC, s.id ASC, m.position LIMIT 11`)

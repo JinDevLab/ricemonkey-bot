@@ -1,21 +1,21 @@
 import { DiscordHono, $webhooks$_$_, $channels$_$messages$_$reactions$_$me } from 'discord-hono'
-import type { CommandContext, ComponentContext } from 'discord-hono'
+import type { CommandContext, ComponentContext, ModalContext } from 'discord-hono'
 import type { APIChatInputApplicationCommandInteraction } from 'discord-api-types/v10'
 import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, unfinished } from './db'
 import { buildSplit, InputError } from './input'
-import { money, renderHistory, renderSplit, renderUnfinished } from './render'
+import { escapeItemName, money, renderHistory, renderSplit, renderUnfinished } from './render'
 
 export interface Bindings {
   DB?: D1Database
   DISCORD_PUBLIC_KEY: string
   DISCORD_TOKEN?: string
 }
-type Env = { Bindings: Bindings }
-type Context = CommandContext<Env> | ComponentContext<Env>
+type Env = { Bindings: Bindings; Variables: { item_name: unknown } }
+type Context = CommandContext<Env> | ComponentContext<Env> | ModalContext<Env>
 const app = new DiscordHono<Env>()
 
 function reject(c: Context, content: string) {
-  if (c.interaction.type === 3) (c as ComponentContext<Env>).update(false)
+  if (c.interaction.type === 3 || c.interaction.type === 5) (c as ComponentContext<Env> | ModalContext<Env>).update(false)
   return c.flags('EPHEMERAL').res({ content, allowed_mentions: { parse: [], users: [] } })
 }
 
@@ -82,13 +82,17 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
     if (!stored) return reject(c, '분배를 찾을 수 없어요.')
     const member = stored.members.find((m) => m.user_id === user)
     if (action === 'uploaded') {
-      if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 올렸어요를 누를 수 있어요.')
+      if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
     } else if (stored.split.distributor_id !== user) return reject(c, '분배자만 이 버튼을 누를 수 있어요.')
     if (stored.split.status !== 'active') return c.update().res(renderSplit(stored))
     let completed = false
     let changed = false
     if (action === 'uploaded') {
-      changed = await markUploaded(db, id, guild, user)
+      if (member!.status === 'purchased') return c.update().res(renderSplit(stored))
+      return c.resModal({ custom_id: `item;${id}`, title: '아이템 등록', components: [{
+        type: 1, components: [{ type: 4, custom_id: 'item_name', label: '등록한 아이템', style: 1,
+          required: true, max_length: 100, ...(member!.item_name ? { value: member!.item_name } : {}) }],
+      }] })
     } else {
       if (action === 'cancel') changed = await cancelSplit(db, id, guild, user)
       else {
@@ -112,28 +116,52 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
         }
       })())
     }
-    if (action === 'uploaded' && c.env.DISCORD_TOKEN) {
-      // discord-hono schedules this callback request with waitUntil and returns an empty HTTP 202.
-      return c.update().res(data, undefined, async (response) => {
-        if (!response.ok) {
-          console.error('interaction callback failed', { action, status: response.status })
-          return
-        }
-        try {
-          const notification = await c.rest('POST', $webhooks$_$_,
-            [c.interaction.application_id, c.interaction.token], {
-              content: `<@${stored.split.distributor_id}> <@${user}>님이 ${money(member!.listing_amount)}메소로 올렸어요`,
-              allowed_mentions: { parse: [], users: [stored.split.distributor_id] },
-            })
-          if (!notification.ok) console.error('upload notification failed', { action, status: notification.status })
-        } catch {
-          console.error('upload notification failed', { action, status: null })
-        }
-      })
-    }
     return c.update().res(data)
   }))
 }
+
+app.modal('item', guarded<ModalContext<Env>>(async (c) => {
+  const guild = c.interaction.guild_id
+  const user = c.interaction.member?.user.id
+  if (!guild || !user) return reject(c, '서버 안에서 사용해 주세요.')
+  const id = c.ref.custom_value
+  if (!id || id.includes(';')) return reject(c, '잘못된 분배 입력창이에요.')
+  // Type 7 is only usable for a modal opened from a message component.
+  if (!c.interaction.message) return reject(c, '안내 메시지의 아이템 등록 버튼을 다시 눌러 주세요.')
+  const db = database(c)
+  const stored = await getSplit(db, id, guild)
+  if (!stored) return reject(c, '분배를 찾을 수 없어요.')
+  const member = stored.members.find((m) => m.user_id === user)
+  if (!member || member.status === 'excluded') return reject(c, '분배받는 파티원 본인만 아이템을 등록할 수 있어요.')
+  if (stored.split.status !== 'active' || member.status === 'purchased') return c.update().res(renderSplit(stored))
+  const raw = c.get('item_name')
+  const itemName = typeof raw === 'string' ? raw.replace(/[\r\n]+/g, ' ').trim() : ''
+  if (!itemName || itemName.length > 100) return reject(c, '등록한 아이템을 1~100자로 입력해 주세요.')
+  const changed = await markUploaded(db, id, guild, user, itemName)
+  const latest = await getSplit(db, id, guild)
+  if (!latest) throw new Error('Split disappeared')
+  const data = renderSplit(latest)
+  if (!changed || !c.env.DISCORD_TOKEN) return c.update().res(data)
+  const action = 'uploaded'
+  // Keep the existing callback-before-followup transport and diagnostic shape.
+  return c.update().res(data, undefined, async (response) => {
+    if (!response.ok) {
+      console.error('interaction callback failed', { action, status: response.status })
+      return
+    }
+    try {
+      const name = escapeItemName(itemName)
+      const text = member.status === 'pending' ? `**${name}** 등록했어요` : `아이템을 **${name}**(으)로 수정했어요`
+      const notification = await c.rest('POST', $webhooks$_$_, [c.interaction.application_id, c.interaction.token], {
+        content: `<@${stored.split.distributor_id}> <@${user}>님이 ${text} · ${money(member.listing_amount)}메소`,
+        allowed_mentions: { parse: [], users: [stored.split.distributor_id] },
+      })
+      if (!notification.ok) console.error('upload notification failed', { action, status: notification.status })
+    } catch {
+      console.error('upload notification failed', { action, status: null })
+    }
+  })
+}))
 
 // The library's callback transport has no rejection branch. Keep background failures contained
 // without logging REST error objects (which can expose tokens).

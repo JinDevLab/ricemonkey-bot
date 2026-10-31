@@ -78,7 +78,7 @@ export function buildSplit(interaction: APIChatInputApplicationCommandInteractio
       split_id: id, user_id: share.id, display_name: members[position].displayName, position,
       percent_hundredths: members[position].percentHundredths ?? null,
       listing_amount: Number(share.listingAmount), expected_receipt: Number(share.expectedReceipt),
-      status: share.listingAmount === 0n ? 'excluded' : 'pending', uploaded_at: null, purchased_at: null,
+      status: share.listingAmount === 0n ? 'excluded' : 'pending', item_name: null, uploaded_at: null, purchased_at: null,
     })),
   }
 }
