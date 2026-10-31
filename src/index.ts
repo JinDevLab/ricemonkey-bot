@@ -177,8 +177,8 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
     if (action === 'uploaded') {
       if (member!.status === 'purchased') return c.update().res(renderSplit(stored))
       return c.resModal({ custom_id: `item;${id}`, title: '경매장 등록', components: [{
-        type: 1, components: [{ type: 4, custom_id: 'item_name', label: '등록한 아이템', style: 1,
-          required: true, max_length: 100, ...(member!.item_name ? { value: member!.item_name } : {}) }],
+        type: 18, label: '등록한 아이템', component: { type: 4, custom_id: 'item_name', style: 1,
+          required: true, max_length: 100, ...(member!.item_name ? { value: member!.item_name } : {}) },
       }] })
     } else {
       if (action === 'cancel') changed = await cancelSplit(db, id, guild, user)

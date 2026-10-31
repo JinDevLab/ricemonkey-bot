@@ -73,7 +73,7 @@ function component(action: string, id: string, user = distributor, target?: stri
 }
 function modal(id: string, value = '장갑', user = first, guild = 'guild') {
   return { ...command('unused', {}, user, guild), type: 5, message: { id: 'message' },
-    data: { custom_id: `item;${id}`, components: [{ type: 1, components: [{ type: 4, custom_id: 'item_name', value }] }] } }
+    data: { custom_id: `item;${id}`, components: [{ type: 18, component: { type: 4, custom_id: 'item_name', value } }] } }
 }
 async function request(payload: unknown, token = false, binding: D1Database | null = db) {
   const body = JSON.stringify(payload)
@@ -857,8 +857,8 @@ describe('item registration and embed cards', () => {
   it('opens a required short modal, saves normalized input and prefills edits without changing the first timestamp', async () => {
     const id = await create()
     const open = await json(component('uploaded', id, first))
-    expect(open).toMatchObject({ type: 9, data: { custom_id: `item;${id}`, title: '경매장 등록', components: [{ type: 1, components: [{ custom_id: 'item_name', label: '등록한 아이템', style: 1, required: true, max_length: 100 }] }] } })
-    expect(open.data.components[0].components[0].value).toBeUndefined()
+    expect(open).toMatchObject({ type: 9, data: { custom_id: `item;${id}`, title: '경매장 등록', components: [{ type: 18, label: '등록한 아이템', component: { custom_id: 'item_name', style: 1, required: true, max_length: 100 } }] } })
+    expect(open.data.components[0].component.value).toBeUndefined()
     expect((await getSplit(db, id, 'guild'))!.members[0]).toMatchObject({ status: 'pending', item_name: null })
     const saved = await json(modal(id, '  장갑\r\n이름  '))
     expect(saved.type).toBe(7)
@@ -867,7 +867,7 @@ describe('item registration and embed cards', () => {
     expect(original).toMatchObject({ status: 'uploaded', item_name: '장갑 이름' })
     expect(original.uploaded_at).not.toBeNull()
     const reopened = await json(component('uploaded', id, first))
-    expect(reopened.data.components[0].components[0].value).toBe('장갑 이름')
+    expect(reopened.data.components[0].component.value).toBe('장갑 이름')
     await db.prepare('UPDATE split_members SET uploaded_at = ? WHERE split_id = ?').bind('2020-01-01T00:00:00Z', id).run()
     await redraw(modal(id, '새 장갑'))
     expect((await getSplit(db, id, 'guild'))!.members[0]).toMatchObject({ item_name: '새 장갑', uploaded_at: '2020-01-01T00:00:00Z' })
