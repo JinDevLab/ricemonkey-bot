@@ -17,9 +17,10 @@ const app = new DiscordHono<Env>()
 app.cron('0 18 * * *', async (c) => {
   try {
     if (!c.env.DB) throw new Error('DB unavailable')
-    console.info(await purgeExpired(c.env.DB, new Date()))
+    console.info('retention purge', await purgeExpired(c.env.DB, new Date()))
   } catch (error) {
-    console.error(error instanceof Error ? error.name : 'UnknownError')
+    console.error('retention purge failed', errorDetails(error, [c.env.DISCORD_TOKEN, 'DISCORD_TOKEN']))
+    throw error
   }
 })
 
@@ -28,9 +29,9 @@ function reject(c: Context, content: string) {
   return c.flags('EPHEMERAL').res({ content, allowed_mentions: { parse: [], users: [] } })
 }
 
-function errorDetails(error: unknown, c: Context) {
+function errorDetails(error: unknown, secrets: (string | undefined)[]) {
   const redact = (value: string) => {
-    for (const secret of [c.interaction.token, c.env.DISCORD_TOKEN, 'DISCORD_TOKEN']) {
+    for (const secret of secrets) {
       if (secret) value = value.split(secret).join('[redacted]')
     }
     return value.replace(/https?:\/\/\S+/gi, '[url]')
@@ -47,7 +48,7 @@ function guarded<C extends Context>(handler: (c: C) => Promise<Response>) {
     } catch (error) {
       if (error instanceof InputError) return reject(c, error.message)
       // Do not log exception objects: upstream errors can contain interaction tokens or SQL bindings.
-      console.error('interaction handler failed', errorDetails(error, c))
+      console.error('interaction handler failed', errorDetails(error, [c.interaction.token, c.env.DISCORD_TOKEN, 'DISCORD_TOKEN']))
       return reject(c, '잠시 후 다시 시도해 주세요')
     }
   }

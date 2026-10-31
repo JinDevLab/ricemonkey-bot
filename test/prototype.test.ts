@@ -246,6 +246,8 @@ describe('expired splits', () => {
     ['2026-05-31T12:34:56.789Z', '2026-02-28T12:34:56.789Z'],
     ['2024-05-31T12:34:56.789Z', '2024-02-29T12:34:56.789Z'],
     ['2026-10-31T00:00:00.000Z', '2026-07-31T00:00:00.000Z'],
+    ['2027-01-31T12:34:56.789Z', '2026-10-31T12:34:56.789Z'],
+    ['2027-03-31T12:34:56.789Z', '2026-12-31T12:34:56.789Z'],
   ])('clamps three UTC calendar months from %s and preserves the exact boundary', async (now, cutoff) => {
     const expired: string[] = []
     for (const status of ['active', 'completed', 'canceled']) {
@@ -259,6 +261,7 @@ describe('expired splits', () => {
     const recent = await create()
     const other = await create()
     await db.prepare('UPDATE splits SET guild_id = ? WHERE id = ?').bind('other', other).run()
+    await db.prepare('UPDATE splits SET created_at = ? WHERE id IN (?, ?)').bind(now, recent, other).run()
     expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 3, splits: 3 })
     for (const id of expired) {
       expect(await getSplit(db, id, 'guild')).toBeNull()
@@ -269,7 +272,21 @@ describe('expired splits', () => {
     expect(await db.prepare('SELECT COUNT(*) AS n FROM split_members').first('n')).toBe(3)
     expect(await databaseModule.purgeExpired(db, new Date(now))).toEqual({ members: 0, splits: 0 })
   })
-  it('runs the configured cron through the default scheduled export and contains DB errors', async () => {
+  it('rolls back member deletion when the second purge statement fails', async () => {
+    const id = await create()
+    await db.prepare('UPDATE splits SET created_at = ? WHERE id = ?').bind('2000-01-01T00:00:00.000Z', id).run()
+    const before = await getSplit(db, id, 'guild')
+    await db.prepare(`CREATE TRIGGER fail_retention BEFORE DELETE ON splits
+      BEGIN SELECT RAISE(ABORT, 'purge blocked'); END`).run()
+    try {
+      await expect(databaseModule.purgeExpired(db, new Date())).rejects.toThrow('purge blocked')
+      expect(await getSplit(db, id, 'guild')).toEqual(before)
+      expect(await db.prepare('SELECT COUNT(*) FROM split_members WHERE split_id = ?').bind(id).first('COUNT(*)')).toBe(1)
+    } finally {
+      await db.prepare('DROP TRIGGER fail_retention').run()
+    }
+  })
+  it.each([false, true])('runs cron and propagates sanitized failures (waitUntil=%s)', async (withContext) => {
     const config = JSON.parse(await readFile(new URL('../wrangler.jsonc', import.meta.url), 'utf8'))
     const cron = config.triggers.crons[0]
     expect(cron).toBe('0 18 * * *')
@@ -278,12 +295,31 @@ describe('expired splits', () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {})
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     const event = { cron, type: 'scheduled' as const, scheduledTime: Date.now(), noRetry() {} }
-    await app.scheduled(event, { DB: db, DISCORD_PUBLIC_KEY: publicKey })
-    expect(info).toHaveBeenCalledWith({ members: 1, splits: 1 })
+    const pending: Promise<unknown>[] = []
+    const context = withContext ? {
+      waitUntil(promise: Promise<unknown>) { pending.push(promise) }, passThroughOnException() {},
+    } : undefined
+    async function scheduled(binding?: D1Database) {
+      await app.scheduled(event, { DB: binding, DISCORD_PUBLIC_KEY: publicKey, DISCORD_TOKEN: 'fake-bot-token' }, context)
+      if (withContext) {
+        expect(pending).toHaveLength(1)
+        await pending.pop()
+      }
+    }
+    await scheduled(db)
+    expect(info.mock.calls).toEqual([['retention purge', { members: 1, splits: 1 }]])
     expect(await getSplit(db, id, 'guild')).toBeNull()
-    const broken = { prepare() { throw new TypeError('SQL bindings secret user') } } as unknown as D1Database
-    await expect(app.scheduled(event, { DB: broken, DISCORD_PUBLIC_KEY: publicKey })).resolves.toBeUndefined()
-    expect(error.mock.calls).toEqual([['TypeError']])
+    const failure = new TypeError('D1 failure fake-bot-token DISCORD_TOKEN https://private.invalid/secret')
+    const broken = { prepare() { throw failure } } as unknown as D1Database
+    await expect(scheduled(broken)).rejects.toBe(failure)
+    await expect(scheduled()).rejects.toThrow('DB unavailable')
+    expect(error.mock.calls).toEqual([
+      ['retention purge failed', { name: 'TypeError', message: 'D1 failure [redacted] [redacted] [url]' }],
+      ['retention purge failed', { name: 'Error', message: 'DB unavailable' }],
+    ])
+    for (const secret of ['fake-bot-token', 'DISCORD_TOKEN', 'https://private.invalid/secret', id, first]) {
+      expect(JSON.stringify(error.mock.calls)).not.toContain(secret)
+    }
   })
 })
 
