@@ -158,7 +158,7 @@ async function redraw(payload: unknown) {
 const defaults = { 총판매금액: 100000000, 수수료: 5, 파티원1: first }
 
 describe('split confirmation drafts', () => {
-  const expired = '이미 처리했거나 만료된 확인이에요. 다시 만들어 주세요.'
+  const expired = '이미 처리했거나 만료된 확인이에요. /미완료를 먼저 확인하고, 없으면 다시 만들어 주세요.'
   const draftId = (response: any) => response.data.components[0].components[0].custom_id.split(';')[1] as string
   async function count(table: string) { return db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first('n') }
   function privatePayload() {
@@ -169,9 +169,9 @@ describe('split confirmation drafts', () => {
     const calls: { url: string; method: string; body: any }[] = []
     vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
       calls.push({ url, method: init.method!, body: init.body ? JSON.parse(init.body as string) : null })
-      if ((failure === 'http' || failure === 'network') && url.includes('/webhooks/') && init.method === 'POST') {
+      if (failure && url.includes('/webhooks/') && init.method === 'POST') {
         if (failure === 'network') throw new Error('fake-token sensitive')
-        return new Response('{}', { status: 500 })
+        return new Response('{}', { status: failure === '4xx' ? 400 : 500 })
       }
       return new Response(JSON.stringify(url.endsWith('/threads') ? { id: '900', type: 12 } : {}))
     }))
@@ -250,7 +250,7 @@ describe('split confirmation drafts', () => {
     expect(await databaseModule.consumeDraft(db, id, 'guild', first)).toBeNull()
     expect(await databaseModule.replaceDraft(db, id, 'guild', first, buildSplit(command() as any))).toBe(false)
   })
-  it.each(['', 'http', 'network'])('updates preview then posts a public followup, handling %s failure', async (failure) => {
+  it.each(['', '4xx', '5xx', 'network'])('updates preview then posts a public followup, handling %s failure', async (failure) => {
     const id = draftId(await json(command()))
     const calls = rest(failure)
     expect((await request(component('confirm-split', id), true)).status).toBe(202)
@@ -261,30 +261,47 @@ describe('split confirmation drafts', () => {
     expect(calls[1].url).toMatch(/\/webhooks\/app\/fake-token$/)
     expect(calls[1].body).toEqual(renderSplit((await getSplit(db, id, 'guild'))!))
     if (failure) {
-      expect(calls[2]).toMatchObject({ method: 'PATCH', body: { content: '카드를 올리지 못했어요. /미완료로 다시 올려 주세요.', embeds: [], components: [] } })
-      expect(console.error).toHaveBeenCalledWith('public card post', { status: failure === 'http' ? 500 : null })
+      expect(calls[2]).toMatchObject({ method: 'PATCH', body: { content: failure === '4xx'
+        ? '카드를 올리지 못했어요. /미완료로 다시 올려 주세요. 다시 올린 카드는 알림이 가지 않으니 파티원에게 직접 알려 주세요.'
+        : '게시 결과를 확인하지 못했어요. 채널에 카드가 없으면 /미완료로 다시 올리고, 알림이 가지 않으니 파티원에게 직접 알려 주세요.', embeds: [], components: [] } })
+      expect(console.error).toHaveBeenCalledWith('public card post', { status: failure === 'network' ? null : failure === '4xx' ? 400 : 500 })
     } else expect(calls).toHaveLength(2)
     expect(await count('splits')).toBe(1)
     await ephemeral(component('confirm-split', id), expired)
   })
-  it('does not publish after a rejected public callback', async () => {
+  it.each(['http', 'network'])('does not publish or duplicate after public callback %s failure', async (failure) => {
     const id = draftId(await json(command()))
-    const fetch = vi.fn(async () => new Response('{}', { status: 400 }))
+    const fetch = vi.fn(async () => {
+      if (failure === 'network') throw new Error('fake-token sensitive')
+      return new Response('{}', { status: 400 })
+    })
     vi.stubGlobal('fetch', fetch)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     await request(component('confirm-split', id), true)
     await Promise.all(background)
     expect(fetch).toHaveBeenCalledOnce()
+    await ephemeral(component('confirm-split', id), expired)
+    expect(fetch).toHaveBeenCalledOnce()
     expect(await count('splits')).toBe(1)
   })
-  it('rejects a public save failure privately after consumption', async () => {
+  it.each([[false, false], [false, true], [true, false], [true, true]])('cleans up public save failure (delete fails=%s, committed=%s)', async (deleteFails, committed) => {
     const id = draftId(await json(command()))
     const calls = rest()
-    vi.spyOn(databaseModule, 'createSplit').mockRejectedValueOnce(new Error('sensitive'))
-    await ephemeral(component('confirm-split', id), '분배를 저장하지 못했어요. 다시 만들어 주세요.')
+    const save = databaseModule.createSplit
+    vi.spyOn(databaseModule, 'createSplit').mockImplementationOnce(async (...args) => {
+      if (committed) await save(...args)
+      throw new Error('sensitive')
+    })
+    const remove = vi.spyOn(databaseModule, 'deleteSplit')
+    if (deleteFails) remove.mockRejectedValueOnce(new Error('sensitive'))
+    await ephemeral(component('confirm-split', id), deleteFails
+      ? '저장 결과를 확인하지 못했어요. /미완료를 먼저 확인하고, 없으면 다시 만들어 주세요.'
+      : '분배를 저장하지 못했어요. 다시 만들어 주세요.')
+    expect(remove).toHaveBeenCalledExactlyOnceWith(db, id, 'guild')
     expect(calls).toHaveLength(0)
     expect(await count('split_drafts')).toBe(0)
-    expect(await count('splits')).toBe(0)
+    expect(await count('splits')).toBe(deleteFails && committed ? 1 : 0)
+    expect(await count('split_members')).toBe(deleteFails && committed ? 1 : 0)
   })
   it.each(['token', 'channel', 'permissions', 'db'])('checks private %s before consumption', async (failure) => {
     const id = draftId(await json(privatePayload(), true))
@@ -326,6 +343,38 @@ describe('split confirmation drafts', () => {
     await ephemeral(component('edit-split', id), expired)
     await ephemeral({ ...payload, message: { id: 'preview' } }, expired)
   })
+  it.each(['user', 'guild', 'channel', 'message'])('rejects edit modal with invalid %s without replacing the draft', async (failure) => {
+    const id = draftId(await json(command()))
+    const previous = await databaseModule.getDraft(db, id, 'guild', distributor)
+    const payload: any = { ...command('분배', { ...defaults, 총판매금액: 2400000 }), message: { id: 'preview', flags: 64 } }
+    payload.data.custom_id = `edit-split;${id}`
+    if (failure === 'user') payload.member.user.id = first
+    if (failure === 'guild') payload.guild_id = 'other'
+    if (failure === 'channel') payload.channel_id = 'other-channel'
+    if (failure === 'message') delete payload.message
+    const calls = rest()
+    await ephemeral(payload, expired)
+    expect(await databaseModule.getDraft(db, id, 'guild', distributor)).toEqual(previous)
+    expect(await count('splits')).toBe(0)
+    expect(calls).toHaveLength(0)
+  })
+  it.each(['token', 'channel', 'permissions', 'db', 'view'])('rechecks private edit modal %s before replacement', async (failure) => {
+    const id = draftId(await json(privatePayload(), true))
+    const previous = await databaseModule.getDraft(db, id, 'guild', distributor)
+    const payload: any = { ...command('분배', { ...defaults, 총판매금액: 2400000 }), message: { id: 'preview', flags: 64 } }
+    payload.data.custom_id = `edit-split;${id}`
+    if (failure === 'channel') payload.channel = { type: 12 }
+    if (failure === 'permissions') payload.app_permissions = '0'
+    if (failure === 'view') payload.data.resolved.members[first].permissions = '0'
+    const calls = rest()
+    const response = await (await request(payload, failure !== 'token', failure === 'db' ? null : db)).json() as any
+    expect(response).toMatchObject({ type: 4, data: { flags: 64, allowed_mentions: { parse: [], users: [] } } })
+    expect(response.data.content).toContain(failure === 'token' ? '패널 버튼으로 다시 만들어 주세요. /분배를 쓰면 채널에 공개돼요.'
+      : failure === 'channel' ? '일반 텍스트' : failure === 'permissions' ? '봇 권한' : failure === 'view' ? '채널을 볼 권한' : '잠시 후')
+    expect(await databaseModule.getDraft(db, id, 'guild', distributor)).toEqual(previous)
+    expect(await count('splits')).toBe(0)
+    expect(calls).toHaveLength(0)
+  })
   it.each([false, true])('confirms the replacement payload in its original mode (private=%s)', async (privateSplit) => {
     const id = draftId(await json(privateSplit ? privatePayload() : command(), true))
     const payload = command('분배', { ...defaults, 총판매금액: '2400,000', 수수료: 3, 파티원1: second })
@@ -362,6 +411,27 @@ describe('split confirmation drafts', () => {
     await ephemeral({ ...payload, message: { id: 'preview' } }, expired)
     expect(await count('split_drafts')).toBe(0)
     expect(await count('splits')).toBe(0)
+  })
+  it('selects, deletes and rechecks deletion-request drafts by author or JSON member within the guild', async () => {
+    for (const [id, guild, user, member] of [
+      ['author', 'SERVER_ID', 'USER_ID', 'other'],
+      ['member', 'SERVER_ID', 'other', 'USER_ID'],
+      ['other-guild', 'OTHER_SERVER', 'USER_ID', 'USER_ID'],
+      ['no-match', 'SERVER_ID', 'other', 'other'],
+    ]) {
+      await db.prepare('INSERT INTO split_drafts (id, guild_id, user_id, payload, created_at) VALUES (?, ?, ?, ?, ?)')
+        .bind(id, guild, user, JSON.stringify({ members: [{ user_id: member }] }), new Date().toISOString()).run()
+    }
+    const condition = `WHERE guild_id = 'SERVER_ID' AND (user_id = 'USER_ID' OR EXISTS (
+      SELECT 1 FROM json_each(payload, '$.members')
+      WHERE json_extract(value, '$.user_id') = 'USER_ID'))`
+    const selected = await db.prepare(`SELECT id FROM split_drafts ${condition} ORDER BY id`).all<{ id: string }>()
+    expect(selected.results.map((row) => row.id)).toEqual(['author', 'member'])
+    expect(await db.prepare(`SELECT COUNT(*) AS drafts FROM split_drafts ${condition}`).first('drafts')).toBe(2)
+    expect((await db.prepare(`DELETE FROM split_drafts ${condition}`).run()).meta.changes).toBe(2)
+    expect(await db.prepare(`SELECT COUNT(*) AS drafts FROM split_drafts ${condition}`).first('drafts')).toBe(0)
+    const remaining = await db.prepare('SELECT id FROM split_drafts ORDER BY id').all<{ id: string }>()
+    expect(remaining.results.map((row) => row.id)).toEqual(['no-match', 'other-guild'])
   })
   it('applies the draft migration and purges only beyond 24 hours in the same atomic batch', async () => {
     const columns = await db.prepare('PRAGMA table_info(split_drafts)').all<{ name: string }>()
@@ -407,10 +477,12 @@ describe('private thread splits', () => {
     expect(calls.filter((c) => c.method === 'POST' && c.url.endsWith('/channels/channel/messages'))).toHaveLength(0)
     expect(calls.filter((c) => c.method === 'POST' && c.url.includes('/webhooks/'))).toHaveLength(0)
     const replies = calls.filter((c) => c.method === 'PATCH' && c.url.endsWith('/messages/@original')).map((c) => c.body)
+    for (const body of replies) {
+      expect(body.embeds).toEqual([])
+      expect(body.components).toEqual([])
+    }
     if (response) replies.push(response.data)
     for (const body of replies) {
-      expect(body.embeds ?? []).toEqual([])
-      expect(body.components ?? []).toEqual([])
       expect(JSON.stringify(body)).not.toMatch(/메소|100000000|100,000,000|95000000|95,000,000|1억0000만0000|48223350|4822만3350|4677665[09]|4677만6650|4677만6649|비공개 아이템|장갑/)
       expect(body.allowed_mentions).toEqual({ parse: [], users: [] })
     }
@@ -508,7 +580,7 @@ describe('private thread splits', () => {
     expect(await count()).toBe(0)
     expect(await db.prepare('SELECT COUNT(*) AS n FROM split_members').first('n')).toBe(0)
     const content = calls.at(-1)!.body.content
-    expect(content).toContain('/분배를 쓰면 채널에 공개')
+    expect(content).toContain('패널 버튼으로 다시 만들어 주세요. /분배를 쓰면 채널에 공개돼요.')
     if (path === '/threads') {
       expect(content).toContain('스레드를 만들지 못했어요')
       expect(content).toContain('봇 권한')
@@ -688,7 +760,7 @@ describe('private thread splits', () => {
     const calls = await submit('/messages/@original', network)
     expect(await count()).toBe(1)
     expect(calls).toHaveLength(5)
-    expect(console.error).toHaveBeenCalledWith('private response failed', { status: network ? null : 403 })
+    expect(console.error).toHaveBeenCalledWith('response edit failed', { status: network ? null : 403 })
   })
   it.each(['{invalid', JSON.stringify({ id: 'channel', type: 0 })])('refuses invalid thread response %s before invites or cards', async (body) => {
     const calls = await submit('', false, 403, body)

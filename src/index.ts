@@ -103,7 +103,7 @@ function splitModal(custom_id: string, title: string, stored?: StoredSplit): API
 
 app.command('분배', guarded<CommandContext<Env>>(async (c) => c.resModal(splitModal('split', '분배'))))
 
-const publicSplitNotice = '/분배를 쓰면 채널에 공개돼요.'
+const publicSplitNotice = '패널 버튼으로 다시 만들어 주세요. /분배를 쓰면 채널에 공개돼요.'
 const privateFailure = `비공개 분배 스레드를 만들지 못했어요. 봇 권한을 확인해 주세요. ${publicSplitNotice}`
 const threadPermissions = [
   [PermissionFlagsBits.ViewChannel, '채널 보기'],
@@ -137,18 +137,18 @@ app.component('private-split', guarded<ComponentContext<Env>>(async (c) => {
   return c.resModal(splitModal('private-split', '비공개 분배'))
 }))
 
-// Never send a private card through an interaction response in the public parent channel.
-async function privateReply(c: ComponentContext<Env> | ModalContext<Env>, content: string) {
+// Edit the original response with status only, clearing preview amounts and buttons; never include a private card.
+async function replyOriginal(c: ComponentContext<Env> | ModalContext<Env>, content: string) {
   try {
     const response = await c.rest('PATCH', $webhooks$_$_$messages$original,
       [c.interaction.application_id, c.interaction.token], { content, embeds: [], components: [], allowed_mentions: { parse: [], users: [] } })
-    if (!response.ok) console.error('private response failed', { status: response.status })
+    if (!response.ok) console.error('response edit failed', { status: response.status })
   } catch {
-    console.error('private response failed', { status: null })
+    console.error('response edit failed', { status: null })
   }
 }
 
-const expiredDraft = '이미 처리했거나 만료된 확인이에요. 다시 만들어 주세요.'
+const expiredDraft = '이미 처리했거나 만료된 확인이에요. /미완료를 먼저 확인하고, 없으면 다시 만들어 주세요.'
 
 async function draftContext(c: ComponentContext<Env> | ModalContext<Env>) {
   const guild = c.interaction.guild_id
@@ -226,6 +226,12 @@ app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
       await createSplit(db, stored)
     } catch {
       console.error('public split save', { status: null })
+      try {
+        await deleteSplit(db, stored.split.id, stored.split.guild_id)
+      } catch {
+        console.error('public split delete', { status: null })
+        return reject(c, '저장 결과를 확인하지 못했어요. /미완료를 먼저 확인하고, 없으면 다시 만들어 주세요.')
+      }
       return reject(c, '분배를 저장하지 못했어요. 다시 만들어 주세요.')
     }
     if (!c.env.DISCORD_TOKEN) return c.update(false).res(renderSplit(stored))
@@ -241,7 +247,9 @@ app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
         status = card.status
       } catch {}
       console.error('public card post', { status })
-      await privateReply(c, '카드를 올리지 못했어요. /미완료로 다시 올려 주세요.')
+      await replyOriginal(c, status !== null && status >= 400 && status < 500
+        ? '카드를 올리지 못했어요. /미완료로 다시 올려 주세요. 다시 올린 카드는 알림이 가지 않으니 파티원에게 직접 알려 주세요.'
+        : '게시 결과를 확인하지 못했어요. 채널에 카드가 없으면 /미완료로 다시 올리고, 알림이 가지 않으니 파티원에게 직접 알려 주세요.')
     })
   }
   return c.update().resDefer(async () => {
@@ -256,7 +264,7 @@ app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
       })
       if (!response.ok) {
         console.error(action, { status: response.status })
-        return await privateReply(c, failure)
+        return await replyOriginal(c, failure)
       }
       const thread = await response.json()
       if (thread.type !== 12 || typeof thread.id !== 'string' || !/^\d+$/.test(thread.id)) throw new Error('Invalid private thread')
@@ -268,7 +276,7 @@ app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
         const added = await c.rest('PUT', $channels$_$threadmembers$_, [thread.id, id])
         if (!added.ok) {
           console.error(action, { status: added.status })
-          return await privateReply(c, failure)
+          return await replyOriginal(c, failure)
         }
       }
       action = 'private split save'
@@ -281,7 +289,7 @@ app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
         status = card.status
         throw new Error('Card post failed')
       }
-      await privateReply(c, `<#${thread.id}>에 비공개 분배를 만들었어요.`)
+      await replyOriginal(c, `<#${thread.id}>에 비공개 분배를 만들었어요.`)
     } catch {
       console.error(action, { status })
       // A save exception may have committed; only definite card rejection permits cleanup.
@@ -296,7 +304,7 @@ app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
             : '카드를 올리지 못했지만 기록이 남아 있어요. /미완료로 스레드에 카드를 다시 올릴 수 있어요.'
         }
       }
-      await privateReply(c, failure)
+      await replyOriginal(c, failure)
     }
   })
 }))
@@ -392,12 +400,12 @@ app.component('repost', guarded<ComponentContext<Env>>(async (c) => {
         })
         if (!response.ok) {
           console.error('private card repost', { status: response.status })
-          return await privateReply(c, '비공개 스레드에 카드를 다시 올리지 못했어요.')
+          return await replyOriginal(c, '비공개 스레드에 카드를 다시 올리지 못했어요.')
         }
-        await privateReply(c, `<#${stored.split.channel_id}>에 카드를 다시 올렸어요.`)
+        await replyOriginal(c, `<#${stored.split.channel_id}>에 카드를 다시 올렸어요.`)
       } catch {
         console.error('private card repost', { status: null })
-        await privateReply(c, '비공개 스레드에 카드를 다시 올리지 못했어요.')
+        await replyOriginal(c, '비공개 스레드에 카드를 다시 올리지 못했어요.')
       }
     })
   }
