@@ -177,7 +177,7 @@ npx wrangler deploy --dry-run
 
 ### 서버 관리자용 초대와 권한
 
-Discord Developer Portal의 앱 설치 설정에서 서버 설치(Guild Install)를 사용하고 `bot`, `applications.commands` 범위의 초대 링크로 서버에 추가해 주세요. 초대 시 서버 관리 권한이 필요해요. 봇에는 사용할 채널의 View Channel, Send Messages, Embed Links, Read Message History, Add Reactions 권한을 허용해 주세요. 버튼 방식에는 Create Private Threads(비공개 스레드 만들기), Send Messages in Threads(스레드에서 메시지 보내기) 두 권한이 추가로 필요해요. 현재 구현 기준 전체 초대 permissions 값은 `343597468736`이에요. Manage Threads(스레드 관리) 없이 동작하도록 구현했지만, `invitable: false` 스레드에 봇이 파티원을 추가할 수 있는지는 실제 Discord에서 아직 확인하지 않았어요. `/분배`만 쓰면 이 두 추가 권한은 필요 없어요. 관리자(Administrator) 권한 전체를 줄 필요는 없어요. 채널별 권한 덮어쓰기도 확인해 주세요. 패널 게시·버튼 클릭·입력 제출마다 값이 있는 채널 종류와 봇 권한을 안내용으로 검사하며, 누락된 값은 REST 결과로 판단하고 공개로 대체하지 않아요. 파티원의 채널 보기 권한이 없다고 확인되면 거절해요. 비공개 생성과 다른 채널에서의 비공개 카드 재게시에는 봇 토큰이 필요해요. 실제 스레드 동작은 아직 확인하지 않았어요.
+Discord Developer Portal의 앱 설치 설정에서 서버 설치(Guild Install)를 사용하고 `bot`, `applications.commands` 범위의 초대 링크로 서버에 추가해 주세요. 초대 시 서버 관리 권한이 필요해요. 봇에는 사용할 채널의 View Channel, Send Messages, Embed Links, Read Message History, Add Reactions 권한을 허용해 주세요. 버튼 방식에는 Create Private Threads(비공개 스레드 만들기), Send Messages in Threads(한글 화면에서는 `스레드와 포럼에서 메시지 보내기`로 보일 수 있어요) 두 권한이 추가로 필요해요. 현재 구현 기준 전체 초대 permissions 값은 `343597468736`이에요. Manage Threads(스레드 관리) 없이 동작하도록 구현했지만, `invitable: false` 스레드에 봇이 파티원을 추가할 수 있는지는 실제 Discord에서 아직 확인하지 않았어요. `/분배`만 쓰면 이 두 추가 권한은 필요 없어요. 관리자(Administrator) 권한 전체를 줄 필요는 없어요. 채널별 권한 덮어쓰기도 확인해 주세요. 패널 게시·버튼 클릭·입력 제출마다 값이 있는 채널 종류와 봇 권한을 안내용으로 검사하며, 누락된 값은 REST 결과로 판단하고 공개로 대체하지 않아요. 파티원의 채널 보기 권한이 없다고 확인되면 거절해요. 비공개 생성과 다른 채널에서의 비공개 카드 재게시에는 봇 토큰이 필요해요. 실제 스레드 동작은 아직 확인하지 않았어요.
 
 ### 문의와 개인정보
 
