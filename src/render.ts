@@ -23,13 +23,21 @@ const item = (m: Pick<MemberRow, 'item_name' | 'status'>) => m.item_name ? escap
 export function renderSplit({ split: s, members }: StoredSplit): APIInteractionResponseCallbackData {
   const visible = members.filter((m) => m.status !== 'excluded')
   const purchased = visible.filter((m) => m.status === 'purchased').length
+  const percentages = [s.distributor_percent_hundredths, ...members.map((m) => m.percent_hundredths)]
+  const unspecified = percentages.filter((p) => p === null).length
+  const remaining = 10000 - percentages.reduce<number>((sum, p) => sum + (p ?? 0), 0)
+  // A common denominator preserves exact equality before display rounding.
+  const denominator = unspecified || 1
+  const weight = (p: number | null) => p === null ? remaining : p * denominator
+  const showPercent = visible.some((m) => weight(m.percent_hundredths) !== weight(s.distributor_percent_hundredths))
+  const percent = (p: number | null) => showPercent ? ` · ${Number((Math.round(weight(p) / denominator) / 100).toFixed(2))}%` : ''
   const description = [
-    [`아이템 판매액: ${money(s.total_sale)}`,
+    [`총판매액: ${money(s.total_sale)}`,
       `실수령액: ${money(s.net_sale)}`,
       `경매장 수수료: ${s.sale_fee_percent}%`].join('\n'),
-    [`분배자 <@${s.distributor_id}>`, `실수령액: ${money(s.distributor_final)}`].join('\n'),
+    [`분배자 <@${s.distributor_id}>${percent(s.distributor_percent_hundredths)}`, `실수령액: ${money(s.distributor_final)}`].join('\n'),
     ...visible.map((m) => [
-      `<@${m.user_id}> · ${memberStatus[m.status]}`,
+      `<@${m.user_id}>${percent(m.percent_hundredths)} · ${memberStatus[m.status]}`,
       ...(m.item_name || m.status === 'uploaded' ? [`아이템: ${item(m)}`] : []),
       `경매장 등록가: ${listingMoney(m.listing_amount)}`,
       `실수령액: ${money(m.expected_receipt)}`,
@@ -41,8 +49,8 @@ export function renderSplit({ split: s, members }: StoredSplit): APIInteractionR
     embeds: [{ title: s.status === 'active' ? `💰 분배 진행 중 (${purchased}/${visible.length} 구매 완료)` : s.status === 'completed' ? '✅ 분배 완료' : '🚫 분배 취소', color: colors[s.status], description }],
     allowed_mentions: { parse: [], users: visible.map((m) => m.user_id) },
     components: s.status === 'active' ? [
-      row([button(`uploaded;${s.id}`, '아이템 등록', 1)]),
-      row(visible.map((m) => button(`purchased;${s.id};${m.user_id}`, `구매 완료 · ${m.display_name}`, 3, m.status === 'purchased'))),
+      row([button(`uploaded;${s.id}`, '경매장 등록', 1)]),
+      row(visible.map((m) => button(`purchased;${s.id};${m.user_id}`, `구매 완료 · ${m.display_name}`, 3, m.status !== 'uploaded'))),
       row([button(`cancel;${s.id}`, '분배 취소', 4)]),
     ] : [],
   }
@@ -66,6 +74,6 @@ export function renderUnfinished({ upload, purchase }: { upload: PendingRow[]; p
 export function renderHistory(rows: HistoryRow[]): APIInteractionResponseCallbackData {
   return { allowed_mentions: { parse: [], users: [] }, embeds: [{
     title: '📚 내 분배 내역 · 최근 10건', color: colors.active,
-    description: rows.map((s) => `${date(s.created_at)} · 분배자 <@${s.distributor_id}>\n아이템 판매액: ${money(s.total_sale)}\n내 실수령액: ${money(s.my_share)} · ${splitStatus[s.status]}`).join('\n\n') || '참여한 분배가 없어요.',
+    description: rows.map((s) => `${date(s.created_at)} · 분배자 <@${s.distributor_id}>\n총판매액: ${money(s.total_sale)}\n내 실수령액: ${money(s.my_share)} · ${splitStatus[s.status]}`).join('\n\n') || '참여한 분배가 없어요.',
   }] }
 }
