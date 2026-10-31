@@ -126,10 +126,10 @@ export async function history(db: D1Database, guild: string, user: string) {
   // UNION uses the distributor and member indexes instead of scanning all guild history for an OR.
   const rows = await db.prepare(`SELECT * FROM (
     SELECT s.*, s.distributor_final AS my_share FROM splits s
-      WHERE s.guild_id = ? AND s.distributor_id = ?
+      WHERE s.guild_id = ? AND s.distributor_id = ? AND s.status != 'canceled'
     UNION ALL
     SELECT s.*, m.expected_receipt AS my_share FROM split_members m
-      JOIN splits s ON s.id = m.split_id WHERE m.user_id = ? AND s.guild_id = ?
+      JOIN splits s ON s.id = m.split_id WHERE m.user_id = ? AND s.guild_id = ? AND s.status != 'canceled'
     ) ORDER BY created_at DESC, id DESC LIMIT 10`).bind(guild, user, user, guild).all<HistoryRow>()
   return rows.results
 }
