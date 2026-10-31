@@ -60,16 +60,17 @@ GitHub ruleset이 force push, 브랜치 삭제, merge commit을 막는다. CI는
 
 ## 8. 배포 후 문제가 생겼을 때
 - 급하면 `npx wrangler rollback`으로 코드부터 복구한다. DB는 되돌아가지 않는다.
+- 금액 확인 기능 이전 Worker로 rollback하면 `confirm-split`·`edit-split` 처리기가 없어 이미 열린 미리보기의 버튼이 실패하고 `split_drafts` 임시 기록 정리도 멈춘다. DB의 임시 기록은 남으므로 복구 후 처리기와 일일 정리가 포함된 Worker인지 확인한다.
 - cron 핸들러가 없는 0.4.0 이전 버전으로 rollback하면 예약 호출이 오류를 내고 자동 삭제가 멈출 수 있다. 이는 추정이다. [Cron Triggers 공식 문서](https://developers.cloudflare.com/workers/configuration/cron-triggers/)는 scheduled 핸들러가 필요하다고 설명하지만, [rollback 문서](https://developers.cloudflare.com/workers/configuration/versions-and-deployments/rollbacks/)에서 cron 설정과 rollback의 관계는 확인하지 못했다. 복구 후 예약 설정과 Cron 이벤트·Workers Logs의 성공 여부를 확인하고, 필요하면 cron 핸들러를 포함한 수정 버전을 배포한다.
 - 그다음 문제 커밋을 `git revert`하고 다음 번호로 릴리스한다. 되돌리지 않으면 다음 배포에서 문제가 다시 나온다.
 - DB 구조를 바꾼 릴리스는 되돌리지 않고, 새 구조를 읽도록 고친 수정 릴리스를 낸다.
 - Worker 버전과 명령 정의가 어긋나면 먼저 배포된 Worker 버전과 해당 커밋을 확인하고, 다음으로 전역·테스트 서버 명령의 실제 등록 범위를 조회한다. 마지막으로 그 커밋의 `src/commands.ts`와 입력 핸들러를 비교한다. Worker 배포를 먼저 맞춘 뒤 필요한 범위만 재등록하며, 전역/서버 중복과 Discord 반영 지연도 구분한다.
 
 ## 9. 운영자 삭제 요청 처리
-이 절은 운영 절차이며 로컬 검사나 개발 중에는 실행하지 않는다. 공개 이슈에 사용자 ID·서버 ID 외 정보가 적혔다면 더 공개하도록 요구하지 않는다. 운영자가 이슈에서 확인 방법을 안내하여 해당 Discord 계정 본인이나 해당 서버 관리자임을 확인한다. 확인하지 못하면 삭제하지 않는다. 요청 대상과 처리 범위를 확인한 뒤, 해당 서버에서 삭제 대상 사용자가 분배자 또는 파티원(제외자 포함)으로 참여한 분배 전체를 삭제한다. 같은 분배의 다른 참여자 기록도 함께 지워짐을 안내한다.
+이 절은 운영 절차이며 로컬 검사나 개발 중에는 실행하지 않는다. 공개 이슈에 사용자 ID·서버 ID 외 정보가 적혔다면 더 공개하도록 요구하지 않는다. 운영자가 이슈에서 확인 방법을 안내하여 해당 Discord 계정 본인이나 해당 서버 관리자임을 확인한다. 확인하지 못하면 삭제하지 않는다. 요청 대상과 처리 범위를 확인한 뒤, 해당 서버에서 삭제 대상 사용자가 분배자 또는 파티원(제외자 포함)으로 참여한 분배와 확인 전 임시 기록 전체를 삭제한다. 같은 분배·임시 기록의 다른 참여자 정보도 함께 지워짐을 안내한다.
 
 1. 아래 SQL의 `SERVER_ID`, `USER_ID`를 요청 범위로 바꾼다. 입력이 Discord 숫자 ID인지 확인하고 SQL에 임의 문자열을 붙이지 않는다.
-2. `npx wrangler d1 execute ricemonkey-bot --remote --command "<SQL>"`로 먼저 대상 분배와 멤버 건수를 확인한다. 불필요한 사용자 정보는 조회하지 않는다.
+2. `npx wrangler d1 execute ricemonkey-bot --remote --command "<SQL>"`로 먼저 대상 분배·멤버·임시 기록 건수를 확인한다. 불필요한 사용자 정보는 조회하지 않는다. `split_drafts`의 분배자는 `user_id` 칼럼에 있지만 파티원은 JSON `payload`의 `members` 안에만 있으므로 두 경로를 모두 검사한다.
 
 ```sql
 SELECT COUNT(*) AS splits,
@@ -81,6 +82,10 @@ SELECT COUNT(*) AS splits,
 FROM splits s WHERE s.guild_id = 'SERVER_ID'
   AND (s.distributor_id = 'USER_ID' OR EXISTS (
     SELECT 1 FROM split_members m WHERE m.split_id = s.id AND m.user_id = 'USER_ID'));
+SELECT COUNT(*) AS drafts FROM split_drafts
+WHERE guild_id = 'SERVER_ID' AND (user_id = 'USER_ID' OR EXISTS (
+  SELECT 1 FROM json_each(payload, '$.members')
+  WHERE json_extract(value, '$.user_id') = 'USER_ID'));
 ```
 
 3. 건수와 범위를 확인한 뒤 같은 조건으로 `SELECT s.id`만 조회하여 대상 분배 ID 목록을 고정한다. 멤버 삭제 후에는 참여 조건으로 다시 찾을 수 없으므로 두 DELETE에 반드시 같은 ID 목록을 쓴다. 아래 `SPLIT_ID`는 고정한 전체 목록으로 바꾸고, 서버 조건도 유지한다. 운영 중 새 참여 기록이 생길 수 있으므로 삭제 후 재조회한다.
@@ -90,15 +95,25 @@ DELETE FROM split_members WHERE split_id IN (
   SELECT id FROM splits WHERE guild_id = 'SERVER_ID' AND id IN ('SPLIT_ID')
 );
 DELETE FROM splits WHERE guild_id = 'SERVER_ID' AND id IN ('SPLIT_ID');
+DELETE FROM split_drafts
+WHERE guild_id = 'SERVER_ID' AND (user_id = 'USER_ID' OR EXISTS (
+  SELECT 1 FROM json_each(payload, '$.members')
+  WHERE json_extract(value, '$.user_id') = 'USER_ID'));
 ```
 
-4. 멤버 행을 먼저, 분배 행을 나중에 `wrangler d1 execute --remote`로 실행한다. 실패하면 원인을 확인하고 고정한 목록으로 남은 삭제를 처리한다. 참여 조건으로 다시 찾으면 멤버 삭제만 성공했어도 거짓 0건이 될 수 있다. 아래 `SPLIT_ID`를 3번에서 고정한 전체 ID 목록으로 바꾸어 `splits`와 `split_members`를 각각 세고 둘 다 0건인지 확인한다. 멤버 확인은 부모 행이 이미 지워진 경우도 잡도록 부모 조회에 의존하지 않는다.
+4. 멤버 행을 먼저, 분배 행을 나중에 `wrangler d1 execute --remote`로 실행하고 임시 기록도 위 조건으로 삭제한다. 실패하면 원인을 확인하고, 분배·멤버는 고정한 ID 목록으로 남은 삭제를 처리하며 임시 기록은 같은 참여 조건으로 다시 조회하고 삭제한다. 참여 조건으로 다시 찾으면 멤버 삭제만 성공했어도 거짓 0건이 될 수 있다. 아래 `SPLIT_ID`를 3번에서 고정한 전체 ID 목록으로 바꾸어 `splits`와 `split_members`를 각각 세고 둘 다 0건인지 확인한다. 멤버 확인은 부모 행이 이미 지워진 경우도 잡도록 부모 조회에 의존하지 않는다.
 
 ```sql
 SELECT COUNT(*) AS splits FROM splits
 WHERE guild_id = 'SERVER_ID' AND id IN ('SPLIT_ID');
 SELECT COUNT(*) AS members FROM split_members
 WHERE split_id IN ('SPLIT_ID');
+SELECT COUNT(*) AS drafts FROM split_drafts
+WHERE guild_id = 'SERVER_ID' AND (user_id = 'USER_ID' OR EXISTS (
+  SELECT 1 FROM json_each(payload, '$.members')
+  WHERE json_extract(value, '$.user_id') = 'USER_ID'));
 ```
+
+임시 기록도 0건인지 재확인한다. 처리 중 새 임시 기록이 생기거나 기존 기록이 확인되어 분배로 바뀔 수 있으므로 2번의 참여 조건 집계도 다시 실행하여 분배·멤버·임시 기록이 남았는지 확인한다.
 
 Discord 카드는 별도 삭제가 필요하고 D1 복구 기록에는 [개인정보 안내](privacy.md)의 기간 동안 남을 수 있음을 안내한다. 비공개 스레드 카드는 메시지 관리 권한만으로는 볼 수 없으므로 스레드 관리 권한자나 메시지 관리 권한이 있는 스레드 멤버가 지워야 한다. DB가 3개월 뒤 삭제돼도 스레드의 카드는 남을 수 있다.
