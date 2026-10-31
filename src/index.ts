@@ -1,7 +1,8 @@
-import { DiscordHono, $webhooks$_$_, $channels$_$messages$_$reactions$_$me } from 'discord-hono'
+import { DiscordHono, $webhooks$_$_, $webhooks$_$_$messages$original, $channels$_$threads, $channels$_$threadmembers$_, $channels$_$messages, $channels$_$messages$_$reactions$_$me } from 'discord-hono'
 import type { CommandContext, ComponentContext, ModalContext } from 'discord-hono'
-import type { APILabelComponent } from 'discord-api-types/v10'
-import { cancelSplit, createSplit, getSplit, history, markPurchased, markUploaded, purgeExpired, savePercent, unfinished } from './db'
+import { PermissionFlagsBits } from 'discord-api-types/v10'
+import type { APILabelComponent, APIModalInteractionResponseCallbackData } from 'discord-api-types/v10'
+import { cancelSplit, createSplit, deleteSplit, getSplit, history, markPurchased, markUploaded, purgeExpired, savePercent, unfinished } from './db'
 import { adjustPercent, buildSplit, InputError } from './input'
 import { cardShowsMember, escapeItemName, listingMoney, money, renderHistory, renderSplit, renderUnfinished } from './render'
 
@@ -83,8 +84,8 @@ function updateWithNotification(
   })
 }
 
-app.command('분배', guarded<CommandContext<Env>>(async (c) => c.resModal({
-  custom_id: 'split', title: '분배', components: [
+function splitModal(custom_id: string, title: string): APIModalInteractionResponseCallbackData {
+  return { custom_id, title, components: [
     { type: 18, label: '총판매금액', description: '수수료를 빼기 전 금액', component: {
       type: 4, style: 1, custom_id: 'total', required: true, max_length: 21, placeholder: '240000000',
     } },
@@ -93,8 +94,118 @@ app.command('분배', guarded<CommandContext<Env>>(async (c) => c.resModal({
     { type: 18, label: '파티원', description: '1~5명, 본인 제외', component: {
       type: 5, custom_id: 'members', min_values: 1, max_values: 5,
     } },
-  ],
-})))
+  ] }
+}
+
+app.command('분배', guarded<CommandContext<Env>>(async (c) => c.resModal(splitModal('split', '분배'))))
+
+const privateFailure = '비공개 분배 스레드를 만들지 못했어요. /분배를 쓰면 채널에 공개돼요.'
+const threadPermissions = [
+  [PermissionFlagsBits.ViewChannel, '채널 보기'],
+  [PermissionFlagsBits.CreatePrivateThreads, '비공개 스레드 만들기'],
+  [PermissionFlagsBits.SendMessagesInThreads, '스레드에서 메시지 보내기'],
+  [PermissionFlagsBits.EmbedLinks, '링크 첨부'],
+  [PermissionFlagsBits.ReadMessageHistory, '메시지 기록 보기'],
+  [PermissionFlagsBits.AddReactions, '반응 추가'],
+] as const
+
+function checkPrivateChannel(c: Context) {
+  if (c.interaction.channel?.type !== 0) throw new InputError('일반 텍스트 채널에서만 비공개 분배를 만들 수 있어요.')
+  const permissions = BigInt(c.interaction.app_permissions ?? '0')
+  const missing = threadPermissions.filter(([bit]) => (permissions & bit) === 0n).map(([, name]) => name)
+  if (missing.length) throw new InputError(`봇 권한이 부족해요: ${missing.join(', ')}. 채널 권한을 확인해 주세요.`)
+}
+
+app.command('분배패널', guarded<CommandContext<Env>>(async (c) => {
+  checkPrivateChannel(c)
+  return c.res({
+    content: '버튼을 누르면 입력 창이 열려요. 제출하면 선택한 파티원과의 비공개 스레드가 열려요.\n스레드 관리 권한자는 초대 없이 볼 수 있어요. /분배는 채널에 공개돼요.',
+    allowed_mentions: { parse: [], users: [] },
+    components: [{ type: 1, components: [{ type: 2, style: 1, custom_id: 'private-split', label: '비공개 분배 만들기' }] }],
+  })
+}))
+
+app.component('private-split', guarded<ComponentContext<Env>>(async (c) => {
+  checkPrivateChannel(c)
+  return c.resModal(splitModal('private-split', '비공개 분배'))
+}))
+
+// Never send a private card through an interaction response in the public parent channel.
+async function privateReply(c: ComponentContext<Env> | ModalContext<Env>, content: string) {
+  try {
+    const response = await c.rest('PATCH', $webhooks$_$_$messages$original,
+      [c.interaction.application_id, c.interaction.token], { content, allowed_mentions: { parse: [], users: [] } })
+    if (!response.ok) console.error('private response failed', { status: response.status })
+  } catch {
+    console.error('private response failed', { status: null })
+  }
+}
+
+app.modal('private-split', guarded<ModalContext<Env>>(async (c) => {
+  const stored = buildSplit(c.interaction, { total: c.get('total'), fee: c.get('fee'), members: c.get('members') })
+  if (!c.env.DISCORD_TOKEN) return reject(c, `${privateFailure} 봇 토큰 설정이 필요해요.`)
+  checkPrivateChannel(c)
+  for (const member of stored.members) {
+    const permissions = c.interaction.data.resolved?.members?.[member.user_id]?.permissions
+    if (permissions !== undefined && (BigInt(permissions) & PermissionFlagsBits.ViewChannel) === 0n) {
+      return reject(c, `<@${member.user_id}>님에게 이 채널을 볼 권한이 없어요.`)
+    }
+  }
+  return c.update(false).flags('EPHEMERAL').resDefer(async () => {
+    let action = 'private thread create'
+    let status: number | null = null
+    let saved = false
+    let cardPosted = false
+    let failure = `${privateFailure} 빈 스레드가 남을 수 있어요.`
+    try {
+      const user = c.interaction.member!
+      const name = user.nick ?? user.user.global_name ?? user.user.username
+      const response = await c.rest('POST', $channels$_$threads, [stored.split.channel_id], {
+        name: `분배 · ${name}`.slice(0, 100), type: 12, invitable: false, auto_archive_duration: 10080,
+      })
+      if (!response.ok) {
+        console.error(action, { status: response.status })
+        return await privateReply(c, failure)
+      }
+      const thread = await response.json()
+      if (thread.type !== 12 || typeof thread.id !== 'string' || !/^\d+$/.test(thread.id)) throw new Error('Invalid private thread')
+      stored.split.channel_id = thread.id
+      stored.split.private_thread = 1
+      for (const id of [stored.split.distributor_id, ...stored.members.map((m) => m.user_id)]) {
+        action = 'private thread member add'
+        failure = `${privateFailure} <@${id}>님을 추가하지 못했어요. 빈 스레드가 남을 수 있어요.`
+        const added = await c.rest('PUT', $channels$_$threadmembers$_, [thread.id, id])
+        if (!added.ok) {
+          console.error(action, { status: added.status })
+          return await privateReply(c, failure)
+        }
+      }
+      failure = `${privateFailure} 빈 스레드가 남을 수 있어요.`
+      action = 'private split save'
+      await createSplit(database(c), stored)
+      saved = true
+      action = 'private card post'
+      const card = await c.rest('POST', $channels$_$messages, [thread.id], renderSplit(stored))
+      if (!card.ok) {
+        status = card.status
+        throw new Error('Card post failed')
+      }
+      cardPosted = true
+      await privateReply(c, `<#${thread.id}>에 비공개 분배를 만들었어요.`)
+    } catch {
+      console.error(action, { status })
+      if (saved && !cardPosted) {
+        try {
+          await deleteSplit(database(c), stored.split.id, stored.split.guild_id)
+        } catch {
+          console.error('private split delete', { status: null })
+          failure += ' 기록이 남아 있어 /미완료로 스레드에 카드를 다시 올릴 수 있어요.'
+        }
+      }
+      await privateReply(c, failure)
+    }
+  })
+}))
 
 app.modal('split', guarded<ModalContext<Env>>(async (c) => {
   const stored = buildSplit(c.interaction, { total: c.get('total'), fee: c.get('fee'), members: c.get('members') })
@@ -184,6 +295,24 @@ app.component('repost', guarded<ComponentContext<Env>>(async (c) => {
     return reject(c, '이 분배의 참여자만 카드를 다시 올릴 수 있어요.')
   }
   if (stored.split.status !== 'active') return reject(c, '이미 끝난 분배예요.')
+  if (stored.split.private_thread === 1 && c.interaction.channel_id !== stored.split.channel_id) {
+    if (!c.env.DISCORD_TOKEN) return reject(c, '비공개 스레드에 카드를 다시 올리지 못했어요. 봇 토큰 설정이 필요해요.')
+    return c.update(false).flags('EPHEMERAL').resDefer(async () => {
+      try {
+        const response = await c.rest('POST', $channels$_$messages, [stored.split.channel_id], {
+          ...renderSplit(stored), allowed_mentions: { parse: [], users: [] },
+        })
+        if (!response.ok) {
+          console.error('private card repost', { status: response.status })
+          return await privateReply(c, '비공개 스레드에 카드를 다시 올리지 못했어요.')
+        }
+        await privateReply(c, `<#${stored.split.channel_id}>에 카드를 다시 올렸어요.`)
+      } catch {
+        console.error('private card repost', { status: null })
+        await privateReply(c, '비공개 스레드에 카드를 다시 올리지 못했어요.')
+      }
+    })
+  }
   if (c.interaction.channel_id !== stored.split.channel_id) {
     return reject(c, `이 카드는 <#${stored.split.channel_id}> 채널에서만 다시 올릴 수 있어요. 그 채널에서 /미완료를 실행해 주세요.`)
   }

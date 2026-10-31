@@ -88,7 +88,7 @@ export function buildSplit(interaction: APIModalSubmitInteraction, values: { tot
   const id = crypto.randomUUID()
   return {
     split: {
-      id, guild_id: guild, channel_id: interaction.channel_id, distributor_id: distributor,
+      id, guild_id: guild, channel_id: interaction.channel_id, private_thread: 0, distributor_id: distributor,
       total_sale: total, sale_fee_percent: fee, net_sale: Number(result.netSale),
       distributor_percent_hundredths: null, distributor_final: Number(result.distributorFinal),
       status: 'active', created_at: new Date().toISOString(), completed_at: null, canceled_at: null,

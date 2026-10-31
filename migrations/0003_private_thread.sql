@@ -1,0 +1,1 @@
+ALTER TABLE splits ADD COLUMN private_thread INTEGER NOT NULL DEFAULT 0;

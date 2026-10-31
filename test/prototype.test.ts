@@ -25,7 +25,7 @@ let background: Promise<unknown>[] = []
 beforeAll(async () => {
   platform = await getPlatformProxy({ persist: false, envFiles: ['test/.no-secrets.env'] })
   db = (platform.env as { DB: D1Database }).DB
-  for (const migration of ['0001_init.sql', '0002_item_name.sql']) {
+  for (const migration of ['0001_init.sql', '0002_item_name.sql', '0003_private_thread.sql']) {
     const sql = await readFile(new URL(`../migrations/${migration}`, import.meta.url), 'utf8')
     for (const statement of sql.split(';').filter((s) => s.trim())) await db.prepare(statement).run()
     if (migration === '0001_init.sql') {
@@ -33,10 +33,15 @@ beforeAll(async () => {
       legacy.split.id = 'legacy'
       legacy.members[0].split_id = 'legacy'
       legacy.members[0].status = 'uploaded'
-      await createSplit(db, legacy)
+      await db.prepare(`INSERT INTO splits (id, guild_id, channel_id, distributor_id, total_sale,
+        sale_fee_percent, net_sale, distributor_final, status, created_at) VALUES ('legacy', 'guild', 'channel', '100', 100000000, 5, 95000000, 46776650, 'active', ?)`)
+        .bind(legacy.split.created_at).run()
+      await db.prepare(`INSERT INTO split_members (split_id, user_id, display_name, position, listing_amount, expected_receipt, status)
+        VALUES ('legacy', '200', '첫째', 0, 48223350, 46776649, 'uploaded')`).run()
     }
   }
   const migrated = (await getSplit(db, 'legacy', 'guild'))!
+  expect(migrated.split.private_thread).toBe(0)
   expect(migrated.members[0]).toMatchObject({ status: 'uploaded', item_name: null })
   expect(renderSplit(migrated).embeds![0].description).toContain('아이템 미입력')
 }, 60000)
@@ -145,6 +150,248 @@ async function redraw(payload: unknown) {
   return response.data
 }
 const defaults = { 총판매금액: 100000000, 수수료: 5, 파티원1: first }
+
+describe('private thread splits', () => {
+  const permissions = '343597466688'
+  const thread = '900'
+  function privateInput() {
+    return { ...command(), channel: { type: 0 }, app_permissions: permissions,
+      member: { user: { id: distributor, username: '분배자' }, nick: '표시 이름' },
+      message: { id: 'panel' }, data: { ...command().data, custom_id: 'private-split' } }
+  }
+  function panel() {
+    return { ...privateInput(), type: 2, data: { name: '분배패널', type: 1, id: 'command' } }
+  }
+  function openButton() {
+    return { ...privateInput(), type: 3, data: { component_type: 2, custom_id: 'private-split' } }
+  }
+  function mockRest(fail = '', network = false) {
+    const calls: { url: string; method: string; body: any }[] = []
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, method: init.method!, body: init.body ? JSON.parse(init.body as string) : null })
+      if (fail && url.includes(fail)) {
+        if (network) throw new Error('secret fake-token fake-bot-token 100000000')
+        return new Response('{}', { status: 403 })
+      }
+      return new Response(JSON.stringify(url.endsWith('/threads') ? { id: thread, type: 12 } : {}))
+    }))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    return calls
+  }
+  async function submit(fail = '', network = false) {
+    const calls = mockRest(fail, network)
+    const response = await json(privateInput(), true)
+    expect(response).toEqual({ type: 5, data: { flags: 64 } })
+    await Promise.all(background)
+    return calls
+  }
+  async function count() { return db.prepare('SELECT COUNT(*) AS n FROM splits').first('n') }
+  function repost(id: string, channel_id = 'channel') {
+    return { ...component('unused', ''), channel_id,
+      data: { component_type: 3, custom_id: 'repost', values: [id] } }
+  }
+  it('registers the panel for server managers in both registration forms', () => {
+    for (const definitions of [commands, registrationCommands('guild')]) {
+      expect(definitions.find((c) => c.name === '분배패널')).toMatchObject({ default_member_permissions: '32' })
+    }
+    expect(commands.find((c) => c.name === '분배패널')).toMatchObject({ contexts: [0], integration_types: [0] })
+  })
+  it.each([1, 2, 5, 11, 12, 15])('rejects channel type %s at all entry points', async (type) => {
+    for (const payload of [panel(), openButton(), privateInput()]) {
+      const response = await json({ ...payload, channel: { type } }, true)
+      expect(response).toMatchObject({ type: 4, data: { flags: 64 } })
+      expect(response.data.content).toContain('일반 텍스트')
+    }
+  })
+  it('lists all missing permissions at all entry points', async () => {
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    for (const payload of [panel(), openButton(), privateInput()]) {
+      const response = await json({ ...payload, app_permissions: '0' }, true)
+      expect(response.data.flags).toBe(64)
+      for (const name of ['채널 보기', '비공개 스레드 만들기', '스레드에서 메시지 보내기', '링크 첨부', '메시지 기록 보기', '반응 추가']) expect(response.data.content).toContain(name)
+    }
+    expect(fetch).not.toHaveBeenCalled()
+  })
+  it.each([[10, '채널 보기'], [36, '비공개 스레드 만들기'], [38, '스레드에서 메시지 보내기'],
+    [14, '링크 첨부'], [16, '메시지 기록 보기'], [6, '반응 추가']] as const)('identifies a missing permission bit %s', async (bit, name) => {
+    const response = await json({ ...panel(), app_permissions: String(BigInt(permissions) & ~(1n << BigInt(bit))) })
+    expect(response.data.flags).toBe(64)
+    expect(response.data.content).toBe(`봇 권한이 부족해요: ${name}. 채널 권한을 확인해 주세요.`)
+  })
+  it('posts a public panel and opens exactly the shared modal fields', async () => {
+    const response = await json(panel())
+    expect(response.type).toBe(4)
+    expect(response.data.flags).toBeUndefined()
+    expect(response.data.allowed_mentions).toEqual({ parse: [], users: [] })
+    expect(response.data.components[0].components).toEqual([{ type: 2, style: 1, custom_id: 'private-split', label: '비공개 분배 만들기' }])
+    expect(response.data.content).toContain('초대 없이')
+    const opened = await json(openButton())
+    const normal = await json({ ...command('unused'), data: { name: '분배', type: 1 } })
+    expect(opened).toEqual({ type: 9, data: { ...normal.data, custom_id: 'private-split', title: '비공개 분배' } })
+  })
+  it.each(['input', 'view', 'token'])('rejects %s before any REST or DB write', async (kind) => {
+    const payload = privateInput()
+    if (kind === 'input') payload.data.components[0].component.value = 'invalid'
+    if (kind === 'view') Object.assign(payload.data.resolved.members[first], { permissions: '0' })
+    const fetch = vi.fn()
+    vi.stubGlobal('fetch', fetch)
+    const response = await json(payload, kind !== 'token')
+    expect(response).toMatchObject({ type: 4, data: { flags: 64 } })
+    expect(fetch).not.toHaveBeenCalled()
+    expect(await count()).toBe(0)
+  })
+  it.each(['/threads', `/thread-members/${distributor}`, `/thread-members/${first}`, `/channels/${thread}/messages`])('contains HTTP failure at %s without public cards', async (path) => {
+    const calls = await submit(path)
+    expect(await count()).toBe(0)
+    expect(await db.prepare('SELECT COUNT(*) AS n FROM split_members').first('n')).toBe(0)
+    expect(calls.filter((c) => c.url.includes('/messages') && c.method === 'POST').every((c) => c.url.endsWith(`/channels/${thread}/messages`))).toBe(true)
+    if (path.includes('thread-members')) expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/messages'))).toBe(false)
+    expect(calls.at(-1)!.body.content).toContain('스레드를 만들지 못했어요')
+    expect(calls.at(-1)!.body.content).toContain('/분배를 쓰면 채널에 공개')
+    expect(calls.at(-1)!.body).not.toHaveProperty('embeds')
+  })
+  it('contains background exceptions and keeps logs free of payloads', async () => {
+    const calls = await submit(`/thread-members/${first}`, true)
+    expect(await count()).toBe(0)
+    expect(calls.at(-1)!.body.content).toContain(`<@${first}>`)
+    expect(console.error).toHaveBeenCalledWith('private thread member add', { status: null })
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toMatch(/fake-token|fake-bot-token|100000000/)
+  })
+  it('keeps recoverable rows if rollback fails and explains unfinished recovery', async () => {
+    vi.spyOn(databaseModule, 'deleteSplit').mockRejectedValueOnce(new Error('sensitive'))
+    const calls = await submit(`/channels/${thread}/messages`)
+    expect(await count()).toBe(1)
+    expect(calls.at(-1)!.body.content).toContain('/미완료')
+    expect(console.error).toHaveBeenCalledWith('private split delete', { status: null })
+  })
+  it('rolls back deletion atomically on a parent delete failure', async () => {
+    const id = await create()
+    const before = await getSplit(db, id, 'guild')
+    await db.prepare(`CREATE TRIGGER fail_private_delete BEFORE DELETE ON splits BEGIN SELECT RAISE(ABORT, 'blocked'); END`).run()
+    try {
+      await expect(databaseModule.deleteSplit(db, id, 'guild')).rejects.toThrow()
+      expect(await getSplit(db, id, 'guild')).toEqual(before)
+    } finally { await db.prepare('DROP TRIGGER fail_private_delete').run() }
+  })
+  it('creates, invites in order, stores and posts only in the private thread', async () => {
+    const calls = await submit()
+    expect(calls.map((c) => [c.method, c.url.split('/api/v10')[1]])).toEqual([
+      ['POST', '/channels/channel/threads'], ['PUT', `/channels/${thread}/thread-members/${distributor}`],
+      ['PUT', `/channels/${thread}/thread-members/${first}`], ['POST', `/channels/${thread}/messages`],
+      ['PATCH', '/webhooks/app/fake-token/messages/@original'],
+    ])
+    expect(calls[0].body).toEqual({ name: '분배 · 표시 이름', type: 12, invitable: false, auto_archive_duration: 10080 })
+    expect(JSON.stringify(calls[0].body)).not.toContain('100000000')
+    const id = calls[3].body.components[0].components[0].custom_id.split(';')[1]
+    const stored = (await getSplit(db, id, 'guild'))!
+    expect(stored.split).toMatchObject({ channel_id: thread, private_thread: 1 })
+    expect(calls[3].body).toEqual(renderSplit(stored))
+    expect(calls[4].body.content).toContain(`<#${thread}>`)
+  })
+  it.each([false, true])('reposts privately from another channel (failure=%s)', async (failure) => {
+    await submit()
+    const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
+    const calls = mockRest(failure ? `/channels/${thread}/messages` : '')
+    expect(await json(repost(id), true)).toEqual({ type: 5, data: { flags: 64 } })
+    await Promise.all(background)
+    expect(calls[0].url).toContain(`/channels/${thread}/messages`)
+    expect(calls[0].body.allowed_mentions).toEqual({ parse: [], users: [] })
+    expect(calls[1].body).not.toHaveProperty('embeds')
+    expect(calls[1].body.content).toContain(failure ? '다시 올리지 못했어요' : `<#${thread}>`)
+    const noToken = await json(repost(id))
+    expect(noToken).toMatchObject({ type: 4, data: { flags: 64 } })
+    expect(noToken.data).not.toHaveProperty('embeds')
+    const inside = await json(repost(id, thread))
+    expect(inside.type).toBe(4)
+    expect(inside.data.flags).toBeUndefined()
+    expect(inside.data.allowed_mentions).toEqual({ parse: [], users: [] })
+  })
+  it('keeps thread buttons, notifications and completion reactions in the original interaction flow', async () => {
+    await submit()
+    const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
+    const inThread = (payload: any) => ({ ...payload, channel_id: thread, channel: { type: 12 } })
+    const adjusted = await percentModal(id, { distributor: '60', [first]: '40' })
+    let calls = mockRest()
+    await request(inThread(adjusted), true)
+    await Promise.all(background)
+    expect(calls[0].body.type).toBe(7)
+    expect(calls[1].url).toContain('/webhooks/app/fake-token')
+    expect(calls[1].body.content).toContain('비율을 바꿨어요')
+    expect((await json(inThread(component('uploaded', id, first)))).type).toBe(9)
+    calls = mockRest()
+    await request(inThread(await modal(id)), true)
+    await Promise.all(background)
+    expect(calls[0].body.type).toBe(7)
+    expect(calls[1].body.content).toContain('장갑')
+    calls = mockRest()
+    await request(inThread(component('purchased', id, distributor, first)), true)
+    await Promise.all(background)
+    expect(calls.some((c) => c.url.includes(`/channels/${thread}/messages/message/reactions/`))).toBe(true)
+    expect(calls.find((c) => c.url.includes('/webhooks/'))!.body.content).toContain('구매했어요')
+    expect((await getSplit(db, id, 'guild'))!.split.status).toBe('completed')
+    expect(calls.some((c) => c.method === 'DELETE' || c.url.endsWith('/channels/channel/messages'))).toBe(false)
+  })
+  it('does not post a card or persist partial rows when saving fails', async () => {
+    vi.spyOn(databaseModule, 'createSplit').mockRejectedValueOnce(new Error('100000000 fake-token'))
+    const calls = await submit()
+    expect(await count()).toBe(0)
+    expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/messages'))).toBe(false)
+    expect(calls.at(-1)!.body.content).toContain('스레드를 만들지 못했어요')
+    expect(console.error).toHaveBeenCalledWith('private split save', { status: null })
+  })
+  it.each([false, true])('contains delayed response failure without public fallback (network=%s)', async (network) => {
+    const calls = await submit('/messages/@original', network)
+    expect(await count()).toBe(1)
+    expect(calls).toHaveLength(5)
+    expect(console.error).toHaveBeenCalledWith('private response failed', { status: network ? null : 403 })
+  })
+  it('refuses an unexpected non-private thread response before invites or card posts', async () => {
+    const calls: string[] = []
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      calls.push(url)
+      return new Response(JSON.stringify({ id: 'channel', type: 0 }))
+    }))
+    expect(await json(privateInput(), true)).toEqual({ type: 5, data: { flags: 64 } })
+    await Promise.all(background)
+    expect(calls).toHaveLength(2)
+    expect(calls[1]).toContain('/messages/@original')
+    expect(await count()).toBe(0)
+  })
+  it('caps the thread name and allows a known ViewChannel permission', async () => {
+    const payload = privateInput()
+    payload.member.nick = '가'.repeat(120)
+    Object.assign(payload.data.resolved.members[first], { permissions: '1024' })
+    const calls = mockRest()
+    await json(payload, true)
+    await Promise.all(background)
+    expect(calls[0].body.name.length).toBe(100)
+    expect(await count()).toBe(1)
+  })
+  it('notifies exclusions inside the thread without removing members and supports cancellation', async () => {
+    const payload = privateInput()
+    payload.data.components[2].component.values!.push(second)
+    const creation = mockRest()
+    await json(payload, true)
+    await Promise.all(background)
+    expect(creation.filter((c) => c.method === 'PUT')).toHaveLength(3)
+    const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
+    const adjusted = await percentModal(id, { distributor: '60', [first]: '40', [second]: '0' })
+    const calls = mockRest()
+    await request({ ...adjusted, channel_id: thread }, true)
+    await Promise.all(background)
+    expect(calls[1].body.content).toContain('이번 분배에서 제외됐어요')
+    expect(calls[1].body.allowed_mentions.users).toContain(second)
+    expect(calls.some((c) => c.url.includes('/thread-members/'))).toBe(false)
+    expect((await json({ ...component('cancel', id), channel_id: thread })).type).toBe(7)
+    expect((await getSplit(db, id, 'guild'))!.split.status).toBe('canceled')
+  })
+  it('preserves public creation with private_thread zero', async () => {
+    const id = await create()
+    expect((await getSplit(db, id, 'guild'))!.split.private_thread).toBe(0)
+  })
+})
 
 describe('percentage notification recovery', () => {
   it('recovers included and excluded notifications after failed callback with identical resubmission', async () => {
@@ -344,7 +591,7 @@ describe('expired splits', () => {
 describe('command definitions and percent parser', () => {
   it('omits global-only fields for guild registration without mutating definitions', () => {
     const guild = registrationCommands('guild')
-    expect(guild).toHaveLength(3)
+    expect(guild).toHaveLength(4)
     for (const item of guild) {
       expect(item).not.toHaveProperty('contexts')
       expect(item).not.toHaveProperty('integration_types')

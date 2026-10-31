@@ -2,6 +2,7 @@ export interface SplitRow {
   id: string
   guild_id: string
   channel_id: string
+  private_thread: 0 | 1
   distributor_id: string
   total_sale: number
   sale_fee_percent: 3 | 5
@@ -37,11 +38,11 @@ export async function createSplit(db: D1Database, { split, members }: StoredSpli
   await db.batch([
     db.prepare(`INSERT INTO splits
       (id, guild_id, channel_id, distributor_id, total_sale, sale_fee_percent, net_sale,
-       distributor_percent_hundredths, distributor_final, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+       distributor_percent_hundredths, distributor_final, status, created_at, private_thread)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
       split.id, split.guild_id, split.channel_id, split.distributor_id, split.total_sale,
       split.sale_fee_percent, split.net_sale, split.distributor_percent_hundredths,
-      split.distributor_final, split.status, split.created_at,
+      split.distributor_final, split.status, split.created_at, split.private_thread,
     ),
     ...members.map((m) => db.prepare(`INSERT INTO split_members
       (split_id, user_id, display_name, position, percent_hundredths, listing_amount, expected_receipt, status)
@@ -49,6 +50,13 @@ export async function createSplit(db: D1Database, { split, members }: StoredSpli
       m.split_id, m.user_id, m.display_name, m.position, m.percent_hundredths,
       m.listing_amount, m.expected_receipt, m.status,
     )),
+  ])
+}
+
+export async function deleteSplit(db: D1Database, id: string, guild: string) {
+  await db.batch([
+    db.prepare('DELETE FROM split_members WHERE split_id IN (SELECT id FROM splits WHERE id = ? AND guild_id = ?)').bind(id, guild),
+    db.prepare('DELETE FROM splits WHERE id = ? AND guild_id = ?').bind(id, guild),
   ])
 }
 

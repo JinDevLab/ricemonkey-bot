@@ -8,6 +8,7 @@ export const commands: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
   {
     type: 1, name: '분배', description: '보스 리워드 판매금을 분배해요', contexts: [0], integration_types: [0],
   },
+  { type: 1, name: '분배패널', description: '이 채널에 비공개 분배 버튼을 올려요', contexts: [0], integration_types: [0], default_member_permissions: '32' },
   { type: 1, name: '미완료', description: '내가 올릴 건과 구매할 건을 확인해요', contexts: [0], integration_types: [0] },
   { type: 1, name: '내역', description: '이 서버에서 참여한 분배 최근 10건을 확인해요', contexts: [0], integration_types: [0] },
 ]
