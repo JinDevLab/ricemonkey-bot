@@ -101,4 +101,4 @@ SELECT COUNT(*) AS members FROM split_members
 WHERE split_id IN ('SPLIT_ID');
 ```
 
-Discord 카드는 별도 삭제가 필요하고 D1 복구 기록에는 [개인정보 안내](privacy.md)의 기간 동안 남을 수 있음을 안내한다.
+Discord 카드는 별도 삭제가 필요하고 D1 복구 기록에는 [개인정보 안내](privacy.md)의 기간 동안 남을 수 있음을 안내한다. 비공개 스레드 카드는 메시지 관리 권한만으로는 볼 수 없으므로 스레드 관리 권한자나 메시지 관리 권한이 있는 스레드 멤버가 지워야 한다. DB가 3개월 뒤 삭제돼도 스레드의 카드는 남을 수 있다.
