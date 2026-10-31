@@ -46,7 +46,11 @@ D1의 일일 한도는 00:00 UTC에 초기화된다.
 - PING(`type: 1`)에는 PONG(`{"type":1}`)으로 응답한다.
 - 최초 응답은 3초 안에 해야 한다. interaction token은 15분만 유효하므로 DB에 저장해 두고 쓰지 않는다.
 - 버튼은 고정 `custom_id`와 DB 조회로 처리해 재배포 후에도 동작하게 한다.
-- 안내, 상태 변경, 알림은 상호작용 응답으로 처리한다.
+- 공개 분배의 안내, 상태 변경, 알림은 상호작용 응답으로 처리한다. 비공개 생성·다른 채널에서의 비공개 재게시 카드는 REST로 원래 스레드에만 보내고, 상호작용에는 본인 전용 지연 응답과 링크·실패 안내만 보낸다.
+- `split`과 `private-split` 모달은 하나의 필드 정의를 공유한다. 패널 버튼 모달은 message가 붙어도 `update(false)`와 EPHEMERAL의 type 5로 지연하여 패널을 갱신하지 않는다. `resDefer`의 waitUntil에서 생성·초대·저장·게시를 순서대로 수행하고 모든 예외를 잡는다.
+- discord-hono 0.23.0의 `followup`은 환경의 `DISCORD_APPLICATION_ID`를 요구한다. 현재 바인딩을 늘리지 않고 interaction.application_id를 사용한 원본 응답 PATCH로 동일한 지연 응답 편집을 한다. private 경로 로그에는 동작 이름·status만 남기며 예외 객체나 메시지를 출력하지 않는다.
+- 0003 마이그레이션은 `splits.private_thread INTEGER NOT NULL DEFAULT 0`을 추가한다. 공개·기존 행은 0, 비공개는 1과 스레드 channel_id를 저장한다. 모든 사용자 초대 성공 전에는 저장하지 않는다. 게시 실패 시 멤버·분배를 하나의 D1 batch로 삭제하고 삭제도 실패하면 비공개 `/미완료` 재게시를 안내한다. 자동 재시도와 공개 fallback은 없다.
+- 스레드 생성은 type 12, invitable false, auto_archive_duration 10080이다. 완료 시 잠금·보관과 제외자 추방을 하지 않아 Manage Threads가 필요 없다. 비공개 재게시 실패는 본인 전용 안내로 끝난다. Discord의 메시지 전송에 따른 보관 해제는 실환경 미확인이다.
 - 동시 클릭으로 상태가 덮어써지지 않도록 파티원별 상태를 개별 행으로 갱신한다.
 - `/분배`는 옵션 없이 Label 모달(`split`)을 열고 제출에는 새 공개 메시지(type 4)로 응답한다. 버튼에서 연 `percent;<id>`·`item;<id>` 모달은 message가 있는 제출에만 type 7을 사용한다. Label 내부의 Text Input·Radio Group은 value, User Select는 values를 `c.get(custom_id)`로 읽는다.
 - 비율 변경은 하나의 D1 batch에서 부모·모든 멤버를 함께 저장한다. 모든 UPDATE에 서버·분배자·active·등록/구매자 없음 조건을 걸고 멤버는 pending/excluded만 허용한다. 경매장 등록이 먼저 저장되면 비율은 어느 행도 바뀌지 않는다. 새 마이그레이션은 없다.
