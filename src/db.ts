@@ -152,8 +152,9 @@ export async function markPurchased(db: D1Database, id: string, guild: string, d
 
 export async function cancelSplit(db: D1Database, id: string, guild: string, distributor: string) {
   const result = await db.prepare(`UPDATE splits SET status = 'canceled', canceled_at = ?
-    WHERE id = ? AND guild_id = ? AND distributor_id = ? AND status = 'active'`)
-    .bind(new Date().toISOString(), id, guild, distributor).run()
+    WHERE id = ? AND guild_id = ? AND distributor_id = ? AND status = 'active'
+    AND NOT EXISTS (SELECT 1 FROM split_members WHERE split_id = ? AND status IN ('uploaded', 'purchased'))`)
+    .bind(new Date().toISOString(), id, guild, distributor, id).run()
   return result.meta.changes > 0
 }
 

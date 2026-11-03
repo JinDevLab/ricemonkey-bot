@@ -47,7 +47,7 @@ export function renderSplit({ split: s, members }: StoredSplit): APIInteractionR
       `경매장 등록가: ${listingMoney(m.listing_amount)}`,
       `실수령액: ${money(m.expected_receipt)}`,
     ].join('\n')),
-    ...(s.status === 'canceled' ? ['이미 구매한 건은 봇이 되돌리지 못해요.'] : []),
+    ...(s.status === 'canceled' && members.some((m) => m.status === 'purchased') ? ['이미 구매한 건은 봇이 되돌리지 못해요.'] : []),
   ].join('\n\n')
   return {
     content: visible.map((m) => `<@${m.user_id}>`).join(' '),

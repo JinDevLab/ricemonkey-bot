@@ -1231,6 +1231,62 @@ describe('split and percentage modals', () => {
     expect(JSON.stringify(renderSplit((await getSplit(db, canceled, 'guild'))!))).not.toContain(`percent;${canceled}`)
     await redraw(component('percent', canceled))
   })
+  describe('cancel lock', () => {
+    const locked = '이미 경매장 등록한 파티원이 있어서 취소할 수 없어요.'
+    const statusOf = async (id: string) => (await getSplit(db, id, 'guild'))!.split.status
+    it('rejects cancel when a member uploaded, keeping the card', async () => {
+      const id = await create()
+      await json(await modal(id))
+      await ephemeral(component('cancel', id), locked)
+      expect(await statusOf(id)).toBe('active')
+    })
+    it('rejects cancel when a member purchased', async () => {
+      const id = await create({ ...defaults, 파티원2: second })
+      await json(await modal(id))
+      await json(component('purchased', id, distributor, first))
+      await ephemeral(component('cancel', id), locked)
+      expect(await statusOf(id)).toBe('active')
+    })
+    it('cancels when members are only pending or excluded', async () => {
+      const id = await create({ ...defaults, 파티원2: second, 파티원1퍼센트: '50', 파티원2퍼센트: '0', 분배자퍼센트: '50' })
+      expect((await getSplit(db, id, 'guild'))!.members.map((m) => m.status)).toEqual(['pending', 'excluded'])
+      await redraw(component('cancel', id))
+      expect(await statusOf(id)).toBe('canceled')
+    })
+    it('blocks via the DB condition when a member uploads between the read and the update', async () => {
+      const id = await create()
+      const cancel = databaseModule.cancelSplit
+      vi.spyOn(databaseModule, 'cancelSplit').mockImplementationOnce(async (...args) => {
+        await json(await modal(id))
+        return cancel(...args)
+      })
+      await ephemeral(component('cancel', id), locked)
+      expect(await statusOf(id)).toBe('active')
+      expect(await cancelSplit(db, id, 'guild', distributor)).toBe(false)
+    })
+    it('keeps non-distributor and finished-split behavior', async () => {
+      const id = await create()
+      await ephemeral(component('cancel', id, first), '분배자만 이 버튼을 누를 수 있어요.')
+      await json(await modal(id))
+      await json(component('purchased', id, distributor, first))
+      expect(await statusOf(id)).toBe('completed')
+      await redraw(component('cancel', id))
+      const canceled = await create()
+      await cancelSplit(db, canceled, 'guild', distributor)
+      await redraw(component('cancel', canceled))
+    })
+    it('shows the purchase warning on canceled cards only when a member purchased', async () => {
+      const warning = '이미 구매한 건은 봇이 되돌리지 못해요.'
+      const id = await create()
+      await cancelSplit(db, id, 'guild', distributor)
+      expect(renderSplit((await getSplit(db, id, 'guild'))!).embeds![0].description).not.toContain(warning)
+      const old = await create()
+      await json(await modal(old))
+      await json(component('purchased', old, distributor, first))
+      await db.prepare("UPDATE splits SET status = 'canceled' WHERE id = ?").bind(old).run()
+      expect(renderSplit((await getSplit(db, old, 'guild'))!).embeds![0].description).toContain(warning)
+    })
+  })
   it.each([4, 5])('opens five fields for %s members with correct distributor handling', async (count) => {
     const payload = command()
     payload.data.components[2].component.values = []
@@ -1578,6 +1634,9 @@ describe('buttons, concurrency and queries', () => {
     const id = await create({ ...defaults, 파티원2: second })
     await json(await modal(id))
     await json(component('purchased', id, distributor, first))
+    await ephemeral(component('cancel', id), '이미 경매장 등록한 파티원이 있어서 취소할 수 없어요.')
+    // Records canceled after a purchase before the cancel lock existed must keep their purchases and warning.
+    await db.prepare("UPDATE splits SET status = 'canceled', canceled_at = ? WHERE id = ?").bind(new Date().toISOString(), id).run()
     const response = await json(component('cancel', id))
     expect(response.data.embeds[0].description).toContain('이미 구매한 건은 봇이 되돌리지 못해요')
     expect(response.data.components).toEqual([])
@@ -1638,7 +1697,8 @@ describe('buttons, concurrency and queries', () => {
     expect((await ephemeral(command('미완료', {}, first))).embeds[0].description).toBe('없어요.')
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toContain('등록 완료')
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toContain('**장갑**')
-    await json(component('cancel', id))
+    await ephemeral(component('cancel', id), '이미 경매장 등록한 파티원이 있어서 취소할 수 없어요.')
+    await db.prepare("UPDATE splits SET status = 'canceled', canceled_at = ? WHERE id = ?").bind(new Date().toISOString(), id).run()
     expect((await ephemeral(command('미완료', {}))).embeds[1].description).toBe('없어요.')
     expect((await ephemeral(command('내역', {}))).embeds[0].description).toBe('참여한 분배가 없어요.')
   })
@@ -1812,7 +1872,6 @@ describe('message amount formatting', () => {
       ...(state === 'uploaded' || state === 'purchased' ? ['아이템: \\*장갑\\*'] : []),
       '경매장 등록가: **2억4619만2893 메소** (246192893)',
       '실수령액: 2억3880만7106 메소',
-      ...(state === 'canceled' ? ['', '이미 구매한 건은 봇이 되돌리지 못해요.'] : []),
     ].join('\n'))
     expect(description.match(/경매장 등록가: \*\*[^\n]+\*\* \((\d+)\)/)?.[1]).toBe(String(stored.members[0].listing_amount))
   })

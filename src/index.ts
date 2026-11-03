@@ -309,6 +309,7 @@ app.component('confirm-split', guarded<ComponentContext<Env>>(async (c) => {
   })
 }))
 
+const cancelLocked = '이미 경매장 등록한 파티원이 있어서 취소할 수 없어요.'
 const percentLocked = '이미 경매장 등록을 한 파티원이 있어서 비율을 바꿀 수 없어요.'
 async function percentSplit(c: ComponentContext<Env> | ModalContext<Env>) {
   const guild = c.interaction.guild_id
@@ -436,6 +437,9 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
     if (action === 'purchased' && stored.members.find((m) => m.user_id === target)?.status === 'pending') {
       return reject(c, '파티원이 아직 경매장 등록을 하지 않았어요.')
     }
+    if (action === 'cancel' && stored.members.some((m) => m.status === 'uploaded' || m.status === 'purchased')) {
+      return reject(c, cancelLocked)
+    }
     let completed = false
     let changed = false
     if (action === 'uploaded') {
@@ -455,7 +459,7 @@ for (const action of ['uploaded', 'purchased', 'cancel'] as const) {
     const latest = await getSplit(db, id, guild)
     if (!latest) throw new Error('Split disappeared')
     const data = renderSplit(latest)
-    if (!changed) return c.update().res(data)
+    if (!changed) return action === 'cancel' && latest.split.status === 'active' ? reject(c, cancelLocked) : c.update().res(data)
     if (completed && c.env.DISCORD_TOKEN) {
       c.executionCtx.waitUntil((async () => {
         try {
