@@ -696,6 +696,13 @@ describe('private thread splits', () => {
     expect(inside.data.flags).toBeUndefined()
     expect(inside.data.allowed_mentions).toEqual({ parse: [], users: [] })
   })
+  it('rejects cancel inside the private thread after registration', async () => {
+    await submit()
+    const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
+    await markUploaded(db, id, 'guild', first, '비공개 아이템')
+    await ephemeral({ ...component('cancel', id), channel_id: thread }, '이미 경매장 등록한 파티원이 있어서 취소할 수 없어요.')
+    expect((await getSplit(db, id, 'guild'))!.split.status).toBe('active')
+  })
   it('contains private repost network failure without leaking stored item names', async () => {
     await submit()
     const id = (await db.prepare('SELECT id FROM splits').first('id')) as string
@@ -1246,6 +1253,8 @@ describe('split and percentage modals', () => {
       await json(component('purchased', id, distributor, first))
       await ephemeral(component('cancel', id), locked)
       expect(await statusOf(id)).toBe('active')
+      expect(await cancelSplit(db, id, 'guild', distributor)).toBe(false)
+      expect(await statusOf(id)).toBe('active')
     })
     it('cancels when members are only pending or excluded', async () => {
       const id = await create({ ...defaults, 파티원2: second, 파티원1퍼센트: '50', 파티원2퍼센트: '0', 분배자퍼센트: '50' })
@@ -1668,10 +1677,12 @@ describe('buttons, concurrency and queries', () => {
   it('keeps cancel/purchase races terminal and consistent', async () => {
     const id = await create()
     await json(await modal(id))
-    await Promise.all([json(component('cancel', id)), json(component('purchased', id, distributor, first))])
+    const [cancel] = await Promise.all([json(component('cancel', id)), json(component('purchased', id, distributor, first))])
     const stored = (await getSplit(db, id, 'guild'))!
-    expect(['canceled', 'completed']).toContain(stored.split.status)
-    if (stored.split.status === 'completed') expect(stored.members[0].status).toBe('purchased')
+    expect(stored.split.status).toBe('completed')
+    expect(stored.members[0].status).toBe('purchased')
+    if (cancel.type === 4) expect(cancel.data).toMatchObject({ content: '이미 경매장 등록한 파티원이 있어서 취소할 수 없어요.', flags: 64 })
+    else expect(cancel.type).toBe(7)
     await redraw(component('uploaded', id, first))
   })
   it('refuses cross-guild and malformed button references', async () => {
