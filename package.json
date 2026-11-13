@@ -17,7 +17,7 @@
   },
   "dependencies": {
     "discord-hono": "0.23.0",
-    "hono": "4.13.14"
+    "hono": "4.13.18"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20261030.1",
